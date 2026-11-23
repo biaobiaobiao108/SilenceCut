@@ -1,0 +1,24 @@
+diff --git a/libavfilter/vf_scale_d3d11.c b/libavfilter/vf_scale_d3d11.c
+--- a/libavfilter/vf_scale_d3d11.c
++++ b/libavfilter/vf_scale_d3d11.c
+@@ -21,4 +21,6 @@
+  */
+ 
++#include <initguid.h>
++
+ #include "libavutil/opt.h"
+ #include "libavutil/pixdesc.h"
+@@ -375,10 +377,8 @@ static int scale_d3d11_config_props(AVFilterLink *outlink)
+-    frames_ctx->initial_pool_size = 10;
+-
+-    if (ctx->extra_hw_frames > 0)
+-        frames_ctx->initial_pool_size += ctx->extra_hw_frames;
++    // Use individually allocated render targets, not a decoder texture array.
++    frames_ctx->initial_pool_size = 0;
+ 
+     AVD3D11VAFramesContext *frames_hwctx = frames_ctx->hwctx;
+     frames_hwctx->MiscFlags = 0;
+-    frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER;
++    frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET;
+ 
+     ret = av_hwframe_ctx_init(s->hw_frames_ctx_out);
