@@ -370,6 +370,33 @@ func TestPlayheadAndBoundaryGestures(t *testing.T) {
 	}
 }
 
+func TestKeyboardBoundaryNudging(t *testing.T) {
+	const second = timeline.Second
+	item := &asset{info: media.Info{Duration: 30 * second}, history: timeline.History{Clips: []timeline.Clip{
+		{Span: timeline.Span{Start: 0, End: 10 * second}, Keep: true},
+		{Span: timeline.Span{Start: 10 * second, End: 15 * second}},
+		{Span: timeline.Span{Start: 15 * second, End: 30 * second}, Keep: true},
+	}}}
+	a := &app{selected: item, position: 12 * second, viewStart: 5 * second, viewLength: 15 * second}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	x := func(s float32) float32 { return wave.X + wave.W*(s-5)/15 }
+	view.ClickAt(x(12), wave.Y+wave.H/2)
+
+	view.Key(ui.Alt, ui.KeyRight)
+	if item.history.Clips[0].End != 10*second+boundaryNudge || a.position != 10*second+boundaryNudge {
+		t.Fatalf("start boundary nudge = %+v at %d", item.history.Clips[:2], a.position)
+	}
+	view.Key(ui.Alt|ui.Shift, ui.KeyLeft)
+	if item.history.Clips[1].End != 15*second-boundaryNudge {
+		t.Fatalf("end boundary nudge = %+v", item.history.Clips[:3])
+	}
+	a.history(false)
+	if item.history.Clips[1].End != 15*second {
+		t.Fatalf("keyboard boundary edit was not undoable: %+v", item.history.Clips[:3])
+	}
+}
+
 func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
 	clips := []timeline.Clip{{Span: timeline.Span{End: 5 * timeline.Second}, Keep: true}}
 	first := &asset{name: "第一段.wav", path: "first", info: media.Info{Duration: 5 * timeline.Second}, filtered: clips,
@@ -413,7 +440,9 @@ func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
 }
 
 func TestBatchStatusAndPublishedFolder(t *testing.T) {
-	a := &app{outputDir: t.TempDir()}
+	item := &asset{name: "失败.wav", info: media.Info{Duration: 5 * timeline.Second},
+		history: timeline.History{Clips: []timeline.Clip{{Span: timeline.Span{End: 5 * timeline.Second}, Keep: true}}}}
+	a := &app{outputDir: t.TempDir(), assets: []*asset{item}, selected: item}
 	view := ui.NewTester(a.view, 1180, 790)
 	if view.HasText("打开导出文件夹") {
 		t.Fatal("choosing a folder must not count as writing files")
@@ -426,15 +455,18 @@ func TestBatchStatusAndPublishedFolder(t *testing.T) {
 	if err := view.Click("取消"); err != nil || ctx.Err() != context.Canceled || !view.HasText("正在取消导出") {
 		t.Fatalf("missing canceling status: %v, %v", err, ctx.Err())
 	}
-	a.end(batchStatus("导出", "已导出 0 个文件", 0, 2, "文件丢失", false))
+	item.exportIssue = "文件丢失"
+	a.end(batchStatus("导出", "已导出 0 个文件", 0, 1, "详情见素材列表", false))
 	view.Frame()
-	if !view.HasText("导出失败 · 已导出 0 个文件 · 2 个素材失败 · 文件丢失") || view.HasText("打开导出文件夹") {
+	if !view.HasText("导出失败 · 已导出 0 个文件 · 1 个素材失败 · 详情见素材列表") ||
+		!view.HasText("导出失败 · 文件丢失") || view.HasText("打开导出文件夹") {
 		t.Fatal("failed export did not show the failure or exposed the folder prematurely")
 	}
 	a.publishedDir = a.outputDir
-	a.status = batchStatus("导出", "已导出 1 个文件", 1, 1, "文件丢失", false)
+	item.exportIssue = ""
+	a.status = batchStatus("导出", "已导出 1 个文件", 1, 1, "详情见素材列表", false)
 	view.Frame()
-	if !view.HasText("导出部分成功 · 已导出 1 个文件 · 1 个素材失败 · 文件丢失") || !view.HasText("打开导出文件夹") {
+	if !view.HasText("导出部分成功 · 已导出 1 个文件 · 1 个素材失败 · 详情见素材列表") || !view.HasText("打开导出文件夹") {
 		t.Fatal("partial export did not expose the result status and folder")
 	}
 }

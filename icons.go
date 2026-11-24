@@ -23,10 +23,10 @@ var (
 	iconZoomIn  = editorIcon(`<circle cx="10" cy="10" r="6"/><path d="m14.5 14.5 5 5M7.25 10h5.5M10 7.25v5.5"/>`)
 	iconKeep    = editorIcon(`<circle cx="12" cy="12" r="8"/><path d="m8.4 12 2.4 2.4 4.8-4.8"/>`)
 	iconDiscard = editorIcon(`<circle cx="12" cy="12" r="8"/><path d="m6.3 6.3 11.4 11.4"/>`)
-	iconSplit   = editorIcon(`<circle cx="6.2" cy="6.2" r="2.5"/><circle cx="6.2" cy="17.8" r="2.5"/><path d="m8 8 12 12M8 16 20 4"/>`)
+	iconInvert  = editorIcon(`<path d="M4 8h14m-3-3 3 3-3 3M20 16H6m3-3-3 3 3 3"/>`)
 	iconUndo    = editorIcon(`<path d="M9 5 4 10l5 5M4 10h10a5 5 0 0 1 0 10h-2"/>`)
 	iconRedo    = editorIcon(`<path d="m15 5 5 5-5 5m5-5H10a5 5 0 0 0 0 10h2"/>`)
-	iconSample  = editorIcon(`<path d="m13 7 4 4m-3-5 2-2a2.1 2.1 0 0 1 3 3l-2 2 .8.8-2 2-.8-.8-7.6 7.6-4 .9.9-4L12 8l-.8-.8 2-2Z"/>`)
+	iconSample  = editorIcon(`<path d="M4 18a8 8 0 0 1 16 0M7 18h12M12 18l4-8"/><circle cx="12" cy="18" r="1.4" fill="currentColor" stroke="none"/>`)
 	iconAudio   = editorIcon(`<path d="M3 12h2m3-4v8m4-12v16m4-13v10m4-6v2"/>`)
 	iconVideo   = editorIcon(`<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 5v14m8-14v14M3 10h5m8 0h5M3 14h5m8 0h5"/>`)
 	iconAdd     = editorIcon(`<path d="M12 5v14M5 12h14"/>`)
@@ -52,7 +52,7 @@ func actionColor(enabled, primary bool) ui.Color {
 func flatAction(c *ui.Context, label string, enabled bool, action func()) ui.Element {
 	button := ui.ButtonBase(c).Role(ui.RoleButton).Label(label).Height(controlHeight).Radius(controlRadius).
 		FocusRing(true).Disabled(!enabled).OnClick(action)
-	actionFace(button, enabled)
+	actionFace(c, button, enabled)
 	return button
 }
 
@@ -72,31 +72,43 @@ func primaryAction(c *ui.Context, label string, enabled bool, action func()) ui.
 		switch {
 		case button.Pressed():
 			face = accentPressed
+		case button.Hovered() && c.Preferences().ReduceMotion:
+			face = accentHover
 		default:
 			hover := float32(0)
 			if button.Hovered() {
 				hover = 1
 			}
-			face = accent.Mix(accentHover, button.Animate("hover", hover, hoverDuration))
+			if c.Preferences().ReduceMotion {
+				face = accent
+			} else {
+				face = accent.Mix(accentHover, button.Animate("hover", hover, hoverDuration))
+			}
 		}
 	}
 	button.Background(face).TextColor(textColor).Children(func() { ui.Text(c, label).SingleLine() })
 	return button
 }
 
-func actionFace(e ui.Element, enabled bool) {
+func actionFace(c *ui.Context, e ui.Element, enabled bool) {
 	if !enabled {
 		return
 	}
 	e.Cursor(ui.CursorPointer)
 	if e.Pressed() {
 		e.Background(pressedFace)
+	} else if e.Hovered() && c.Preferences().ReduceMotion {
+		e.Background(hoverFace)
 	} else {
 		target := float32(0)
 		if e.Hovered() {
 			target = 1
 		}
-		e.Background(hoverFace.Alpha(e.Animate("hover", target, hoverDuration)))
+		if c.Preferences().ReduceMotion {
+			e.Background(hoverFace.Alpha(0))
+		} else {
+			e.Background(hoverFace.Alpha(e.Animate("hover", target, hoverDuration)))
+		}
 	}
 }
 
@@ -109,7 +121,7 @@ func tabStrip(c *ui.Context, label string, selected *int, labels []string, fixed
 			if fixedWidth {
 				tab.Width(58)
 			}
-			actionFace(tab, enabled)
+			actionFace(c, tab, enabled)
 			active := i == *selected
 			tab.Children(func() {
 				color := muted
@@ -122,9 +134,11 @@ func tabStrip(c *ui.Context, label string, selected *int, labels []string, fixed
 			})
 			if active {
 				tab.Children(func() {
-					ui.Box(c.Key("indicator")).Absolute().Left(6).Right(6).Bottom(0).Height(2).
-						Background(actionColor(enabled, true)).
-						Transition(ui.ElementTransition{Duration: switchDuration, Position: true, Width: true, Match: label})
+					indicator := ui.Box(c.Key("indicator")).Absolute().Left(6).Right(6).Bottom(0).Height(2).
+						Background(actionColor(enabled, true))
+					if !c.Preferences().ReduceMotion {
+						indicator.Transition(ui.ElementTransition{Duration: switchDuration, Position: true, Width: true, Match: label})
+					}
 				})
 			}
 		}

@@ -191,7 +191,7 @@ func (a *app) assetRow(c *ui.Context, item *asset) {
 		})
 	}
 	if row.Pressed() || a.selected != item {
-		actionFace(row, true)
+		actionFace(c, row, true)
 	}
 	row.OnShortcut(0, ui.KeyEnter, func() { a.selectAsset(item) })
 	row.Children(func() {
@@ -207,6 +207,9 @@ func (a *app) assetRow(c *ui.Context, item *asset) {
 				ui.Text(c, "正在过滤…").FontSize(11).TextColor(muted)
 			case item.issue != "":
 				ui.Text(c, item.issue).SingleLine().Ellipsis("…").Tooltip(item.issue).FontSize(11).TextColor(waveRemovedInk)
+			case item.exportIssue != "":
+				ui.Text(c, "导出失败 · "+item.exportIssue).SingleLine().Ellipsis("…").
+					Tooltip("导出失败 · " + item.exportIssue).FontSize(11).TextColor(waveRemovedInk)
 			case item.info.Duration > 0:
 				ui.Text(c, clock(item.info.Duration)).FontFeatures("tnum").FontSize(11).TextColor(muted)
 			default:

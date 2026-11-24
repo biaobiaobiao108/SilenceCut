@@ -267,8 +267,8 @@ func (r *recoveryFile) close(discard bool) {
 func (a *app) offerRecovery(previous *recoveryFile) {
 	doc, err := readProject(previous.file.Name() + projectExt)
 	if err != nil {
-		a.status = "无法读取恢复快照 · " + err.Error()
-		previous.close(false)
+		previous.close(true)
+		a.status = "恢复快照已损坏并已丢弃 · " + err.Error()
 		return
 	}
 	a.projectPrompt("恢复上次编辑？", "发现上次退出时留下的未保存项目。", []string{"恢复", "丢弃", "稍后"}, func(choice int) {
@@ -494,7 +494,7 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 				}
 				item.path, item.name, item.file, item.source = source, filepath.Base(source), file, stampOf(file)
 				item.info, item.peaks, item.waveform = info, peaks, wave
-				item.issue, item.offline = "", false
+				item.issue, item.offline, item.exportIssue = "", false, ""
 				if len(item.history.Clips) == 0 {
 					// A crash can interrupt the first analysis. The user can retry it.
 					item.info = media.Info{}

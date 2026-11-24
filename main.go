@@ -74,19 +74,20 @@ func (f filterOptions) custom() (values [3]float64, issues [3]string) {
 }
 
 type asset struct {
-	path, name string
-	file       os.FileInfo
-	info       media.Info
-	peaks      []timeline.Peak
-	waveform   timeline.Waveform
-	automatic  float64
-	settings   timeline.Settings
-	history    timeline.History
-	filtered   []timeline.Clip
-	analyzing  bool
-	issue      string
-	source     sourceStamp
-	offline    bool
+	path, name  string
+	file        os.FileInfo
+	info        media.Info
+	peaks       []timeline.Peak
+	waveform    timeline.Waveform
+	automatic   float64
+	settings    timeline.Settings
+	history     timeline.History
+	filtered    []timeline.Clip
+	analyzing   bool
+	issue       string
+	exportIssue string
+	source      sourceStamp
+	offline     bool
 }
 
 type player interface {
@@ -425,7 +426,7 @@ func (a *app) filter(items []*asset) {
 				item.info, item.peaks, item.automatic = current.info, current.peaks, current.automatic
 				item.waveform = current.waveform
 				item.file, item.settings, item.history = current.file, current.settings, current.history
-				item.filtered, item.analyzing, item.issue = clips, false, ""
+				item.filtered, item.analyzing, item.issue, item.exportIssue = clips, false, "", ""
 				item.offline = false
 				a.markProject()
 				if item == a.selected {
@@ -497,10 +498,19 @@ func (a *app) exportable(item *asset, clips bool) bool {
 
 func (a *app) export(dir string, clips bool) {
 	a.outputDir = dir
-	var work []asset
+	type exportWork struct {
+		item     *asset
+		snapshot asset
+	}
+	type exportFailure struct {
+		item  *asset
+		issue string
+	}
+	var work []exportWork
 	for _, item := range a.assets {
 		if a.exportable(item, clips) {
-			work = append(work, *item)
+			item.exportIssue = ""
+			work = append(work, exportWork{item: item, snapshot: *item})
 		}
 	}
 	onlyKept := a.onlyKept
@@ -508,30 +518,35 @@ func (a *app) export(dir string, clips bool) {
 	a.async(func() {
 		report := a.report()
 		var count, failures int
-		var firstIssue string
+		var failed []exportFailure
 		for index, item := range work {
 			if ctx.Err() != nil {
 				break
 			}
 			var n int
-			current, err := os.Stat(item.path)
-			if err == nil && changed(item.file, current) {
+			current, err := os.Stat(item.snapshot.path)
+			if err == nil && changed(item.snapshot.file, current) {
 				err = errors.New("素材已改变，请先重新过滤")
 			}
 			if err == nil {
 				update := func(value float64) { report((float64(index) + value) / float64(len(work))) }
-				n, err = exportAsset(ctx, item, dir, clips, onlyKept, update)
+				n, err = exportAsset(ctx, item.snapshot, dir, clips, onlyKept, update)
 			}
 			count += n
 			if err != nil && !errors.Is(err, context.Canceled) {
 				failures++
-				if firstIssue == "" {
-					firstIssue = item.name + " · " + err.Error()
-				}
+				failed = append(failed, exportFailure{item: item.item, issue: err.Error()})
 			}
 		}
-		status := batchStatus("导出", fmt.Sprintf("已导出 %d 个文件", count), count, failures, firstIssue, ctx.Err() != nil)
+		detail := "详情见素材列表"
+		if failures == 0 {
+			detail = ""
+		}
+		status := batchStatus("导出", fmt.Sprintf("已导出 %d 个文件", count), count, failures, detail, ctx.Err() != nil)
 		a.win.Update(func() {
+			for _, item := range failed {
+				item.item.exportIssue = item.issue
+			}
 			if count > 0 {
 				a.publishedDir = dir
 			}

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"silencecut/internal/media"
@@ -81,5 +83,38 @@ func TestRecoverySkipsActiveSessions(t *testing.T) {
 	doc, err := readProject(previous.file.Name() + projectExt)
 	if err != nil || doc.Project != state.projectPath {
 		t.Fatalf("stale snapshot was not readable: %+v, %v", doc, err)
+	}
+}
+
+func TestCorruptRecoveryIsDiscarded(t *testing.T) {
+	dir := t.TempDir()
+	first, _, err := openRecoveryAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { first.close(true) })
+	state := &app{recovery: first, projectDirty: true}
+	if err := state.writeRecovery(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := first.file.Name() + projectExt
+	first.close(false)
+	if err := os.WriteFile(snapshot, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	current, previous, err := openRecoveryAt(dir)
+	if err != nil || previous == nil {
+		t.Fatalf("open corrupt recovery: %v, %v", current, previous)
+	}
+	t.Cleanup(func() { current.close(true) })
+	state.offerRecovery(previous)
+	if !strings.Contains(state.status, "恢复快照已损坏并已丢弃") {
+		t.Fatalf("status = %q", state.status)
+	}
+	for _, path := range []string{snapshot, strings.TrimSuffix(snapshot, projectExt)} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("corrupt recovery remains at %s: %v", path, err)
+		}
 	}
 }

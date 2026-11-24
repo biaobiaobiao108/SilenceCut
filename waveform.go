@@ -17,6 +17,7 @@ const (
 	rulerHeight   = 22
 	handleHeight  = 13
 	hitRadius     = 6
+	boundaryNudge = 100_000
 	seekInterval  = 33 * time.Millisecond
 )
 
@@ -144,7 +145,7 @@ func (a *app) timeline(c *ui.Context) {
 				editable := allowed && current
 				iconButton(c.Key("keep"), iconKeep, "保留", "保留选区或当前片段", editable, false, func() { a.edit(true) })
 				iconButton(c.Key("discard"), iconDiscard, "移除", "移除选区或当前片段", editable, false, func() { a.edit(false) })
-				iconButton(c.Key("split"), iconSplit, "反转 0.2 秒", "从游标起反转最多 0.2 秒，止于当前片段边界",
+				iconButton(c.Key("invert"), iconInvert, "反转短段", "从游标起反转最多 0.2 秒，止于当前片段边界",
 					editable && a.position < duration, false, a.invertAtPlayhead)
 				ui.Divider(c).Height(16).AlignSelf(ui.Center).Margin(0, 3)
 				iconButton(c.Key("undo"), iconUndo, "撤销", "撤销", allowed && item.history.CanUndo(), false, func() { a.history(false) })
@@ -174,7 +175,11 @@ func (a *app) timeline(c *ui.Context) {
 					if ready {
 						target = 1
 					}
-					video.Opacity(video.Animate("ready", target, revealDuration))
+					if c.Preferences().ReduceMotion {
+						video.Opacity(target)
+					} else {
+						video.Opacity(video.Animate("ready", target, revealDuration))
+					}
 					if !ready && a.video.Ready() {
 						c.Invalidate()
 					}
@@ -236,7 +241,8 @@ func (a *app) invertAtPlayhead() {
 
 func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Background(waveBack).Clip().
-		Focusable().FocusRing(true).Label("音频波形和播放位置").Description("用左右方向键移动播放游标")
+		Focusable().FocusRing(true).Label("音频波形和播放位置").
+		Description("用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点")
 	clips := item.history.Clips
 	if i := clipAt(clips, a.position); i < len(clips) {
 		kind := "移除片段"
@@ -255,6 +261,10 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 		if a.waveDrag.kind == waveIdle {
 			e.OnShortcut(0, ui.KeyLeft, func() { nudge(-100_000) })
 			e.OnShortcut(0, ui.KeyRight, func() { nudge(100_000) })
+			e.OnShortcut(ui.Alt, ui.KeyLeft, func() { a.nudgeCurrentBoundary(true, -boundaryNudge) })
+			e.OnShortcut(ui.Alt, ui.KeyRight, func() { a.nudgeCurrentBoundary(true, boundaryNudge) })
+			e.OnShortcut(ui.Alt|ui.Shift, ui.KeyLeft, func() { a.nudgeCurrentBoundary(false, -boundaryNudge) })
+			e.OnShortcut(ui.Alt|ui.Shift, ui.KeyRight, func() { a.nudgeCurrentBoundary(false, boundaryNudge) })
 		}
 	}
 	length := a.detailLength(duration)
@@ -485,6 +495,34 @@ func drawTimeRuler(p *ui.Painter, r ui.Rect, span timeline.Span) {
 			p.Text(x+4, r.Y+1, label, 11, muted)
 		}
 	}
+}
+
+func (a *app) nudgeCurrentBoundary(start bool, delta int64) {
+	if a.selected == nil || a.selected.info.Duration <= 0 || a.busy() {
+		return
+	}
+	clips := a.selected.history.Clips
+	index := clipAt(clips, min(a.position, a.selected.info.Duration-1))
+	boundary := index
+	if !start {
+		boundary++
+	}
+	if boundary <= 0 || boundary >= len(clips) {
+		return
+	}
+	left, right := clips[boundary-1], clips[boundary]
+	at := left.End
+	target := max(left.Start, min(right.End, at+delta))
+	if target == at {
+		return
+	}
+	a.stopPlayback()
+	a.selected.history.Edit(
+		timeline.Span{Start: min(at, target), End: max(at, target)},
+		(target > at) == left.Keep,
+	)
+	a.markProject()
+	a.seek(target)
 }
 
 func drawEnvelope(p *ui.Painter, r ui.Rect, columns []timeline.Peak, amplitude float32, color func(float32) ui.Color) {

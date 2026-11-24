@@ -72,8 +72,10 @@ CutInput *cut_open(const char *path, int mode, CutInfo *info, int *err) {
         goto fail;
     }
     AVDictionary *opts = NULL;
+    // The build enables only the demuxers exposed by the app. Keeping the
+    // protocol whitelist here prevents a crafted local file from opening a
+    // network or device resource.
     av_dict_set(&opts, "protocol_whitelist", "file", 0);
-    av_dict_set(&opts, "format_whitelist", "mov,matroska,webm,avi,mpeg,mpegts,flv,asf,mp3,wav,flac,ogg,aac,aiff,caf,ac3", 0);
     *err = avformat_open_input(&in->format, path, NULL, &opts);
     av_dict_free(&opts);
     if (*err < 0) goto fail;
