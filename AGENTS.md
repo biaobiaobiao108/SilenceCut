@@ -20,3 +20,4 @@
 - Go 改动用 `gofmt` 格式化，并运行 `go test ./...` 和 `go vet ./...`。视频集成测试使用本机 `ffmpeg` 生成测试素材，使用 `ffprobe` 独立验证导出结果。验证硬件路径时，可设置 `SILENCECUT_FFMPEG_DEBUG=1` 查看后端日志。
 - `dist/` 和 `.ffmpeg/` 是生成产物。提交源码、测试、构建脚本和必要补丁。
 - 每次修改完成并验证后，使用中文提交信息创建 Git 提交。
+- 每次源码修改完成并验证后，除创建中文提交外，还要在当前平台运行 `sh scripts/package.sh` 重新打包；Windows 测试目录为 `dist/SilenceCut-windows-x64/`。
