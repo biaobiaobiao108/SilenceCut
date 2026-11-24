@@ -31,10 +31,18 @@ case "$(uname -s)" in
     export CGO_LDFLAGS="'-L$sdk_native/lib'"
     go build -trimpath -tags mygo_nowebview -ldflags=-H=windowsgui -o "$bundle/SilenceCut.exe" .
     cp "$sdk"/bin/*.dll "$bundle/"
-    # MinGW's shared runtime is needed only when the toolchain selected it.
-    if objdump -p "$bundle"/*.dll "$bundle/SilenceCut.exe" | grep -qi 'DLL Name: libwinpthread-1.dll'; then
-      runtime=$(gcc -print-file-name=libwinpthread-1.dll)
-      cp "$(cygpath -u "$runtime")" "$bundle/"
+    imports=$(objdump -p "$bundle"/*.dll "$bundle/SilenceCut.exe")
+    if printf '%s\n' "$imports" | grep -qi 'DLL Name: libwinpthread-1\.dll[[:space:]]*$'; then
+      runtime=$(cygpath -u "$(gcc -print-file-name=libwinpthread-1.dll)")
+      # MSYS2 may only expose the runtime DLL next to the GCC executable.
+      if [ ! -f "$runtime" ]; then
+        runtime="$(dirname "$(command -v gcc)")/libwinpthread-1.dll"
+      fi
+      if [ ! -f "$runtime" ]; then
+        echo "Required MinGW runtime DLL not found: libwinpthread-1.dll" >&2
+        exit 1
+      fi
+      cp "$runtime" "$bundle/"
     fi
     cp "$sdk/notice/"* "$bundle/Notices/FFmpeg/"
     cp README.md "$bundle/使用说明.md"

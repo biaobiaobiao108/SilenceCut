@@ -38,6 +38,7 @@ jobs:
           path: dist/SilenceCut-windows-x64.zip
           archive: false
           if-no-files-found: error
+          overwrite: true
 
   macos:
     name: macOS arm64
@@ -60,3 +61,44 @@ jobs:
           path: dist/SilenceCut-macos-arm64.zip
           archive: false
           if-no-files-found: error
+          overwrite: true
+
+  release:
+    name: Publish GitHub Release
+    needs: [windows, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: SilenceCut-*.zip
+          merge-multiple: true
+          path: dist
+      - name: Publish both packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          packages=(dist/SilenceCut-windows-x64.zip dist/SilenceCut-macos-arm64.zip)
+          for package in "${packages[@]}"; do
+            test -s "$package"
+          done
+          if gh release view --json assets,isDraft -- "$TAG" > "$RUNNER_TEMP/release.json"; then
+            jq -r '.assets[].name' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/release-assets"
+            missing=()
+            for package in "${packages[@]}"; do
+              if ! grep -Fxq "${package##*/}" "$RUNNER_TEMP/release-assets"; then
+                missing+=("$package")
+              fi
+            done
+            if (( ${#missing[@]} )); then
+              gh release upload -- "$TAG" "${missing[@]}"
+            fi
+            if jq -e '.isDraft' "$RUNNER_TEMP/release.json" > /dev/null; then
+              gh release edit --draft=false -- "$TAG"
+            fi
+          else
+            gh release create --verify-tag --generate-notes -- "$TAG" "${packages[@]}"
+          fi
