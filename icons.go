@@ -31,12 +31,18 @@ var (
 	iconVideo   = editorIcon(`<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 5v14m8-14v14M3 10h5m8 0h5M3 14h5m8 0h5"/>`)
 	iconAdd     = editorIcon(`<path d="M12 5v14M5 12h14"/>`)
 	iconRemove  = editorIcon(`<path d="M5 7h14m-9-3h4m-7 3 1 13h8l1-13M10 10v6m4-6v6"/>`)
+	iconOpen    = editorIcon(`<path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h3.8l2 2H18a2.5 2.5 0 0 1 2.5 2.5v1.2M4 10.7h16.7l-2.2 8H5.2z"/>`)
+	iconSave    = editorIcon(`<path d="M5 4h11l3 3v13H5zM8 4v6h8V4M8 20v-6h8v6"/>`)
+	iconSliders = editorIcon(`<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="2" fill="currentColor" stroke="none"/>`)
+	iconFocus   = editorIcon(`<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5M8 12h8"/>`)
 )
 
-func iconButton(c *ui.Context, icon *ui.SVG, label, hint string, enabled, primary bool, action func()) {
-	flatAction(c, label, enabled, action).Width(controlHeight).Tooltip(hint).Children(func() {
-		ui.Icon(c, icon).Size(19, 19).TextColor(actionColor(enabled, primary))
+func iconButton(c *ui.Context, icon *ui.SVG, label, hint string, enabled, primary bool, action func()) ui.Element {
+	button := flatAction(c, label, enabled, action).Width(controlHeight).Tooltip(hint)
+	button.Children(func() {
+		ui.Icon(c, icon).Size(18, 18).TextColor(actionColor(enabled, primary))
 	})
+	return button
 }
 
 func actionColor(enabled, primary bool) ui.Color {
@@ -57,8 +63,8 @@ func flatAction(c *ui.Context, label string, enabled bool, action func()) ui.Ele
 }
 
 func textAction(c *ui.Context, label string, enabled bool, action func()) ui.Element {
-	button := flatAction(c, label, enabled, action).Padding(0, 7).TextColor(actionColor(enabled, false))
-	button.Children(func() { ui.Text(c, label).FontSize(12).SingleLine() })
+	button := flatAction(c, label, enabled, action).Padding(0, 9).TextColor(actionColor(enabled, false))
+	button.Children(func() { ui.Text(c, label).FontSize(13).SingleLine() })
 	return button
 }
 
@@ -86,7 +92,8 @@ func primaryAction(c *ui.Context, label string, enabled bool, action func()) ui.
 			}
 		}
 	}
-	button.Background(face).TextColor(textColor).Children(func() { ui.Text(c, label).SingleLine() })
+	button.Background(face).TextColor(textColor)
+	button.Children(func() { ui.Text(c, label).FontSize(13).FontWeight(600).SingleLine() })
 	return button
 }
 
@@ -95,51 +102,64 @@ func actionFace(c *ui.Context, e ui.Element, enabled bool) {
 		return
 	}
 	e.Cursor(ui.CursorPointer)
-	if e.Pressed() {
-		e.Background(pressedFace)
-	} else if e.Hovered() && c.Preferences().ReduceMotion {
-		e.Background(hoverFace)
-	} else {
-		target := float32(0)
-		if e.Hovered() {
-			target = 1
-		}
-		if c.Preferences().ReduceMotion {
-			e.Background(hoverFace.Alpha(0))
-		} else {
-			e.Background(hoverFace.Alpha(e.Animate("hover", target, hoverDuration)))
-		}
+	face := ui.Transparent
+	switch {
+	case e.Pressed():
+		face = pressedFace
+	case e.Hovered():
+		face = hoverFace
 	}
+	if c.Preferences().ReduceMotion {
+		e.Background(face)
+		return
+	}
+	e.Background(e.AnimateColor("face", face, ui.Animation{Duration: hoverDuration}))
+	pose := ui.Pose{}
+	if e.Pressed() {
+		pose.Scale = .97
+	}
+	e.AnimatePose(pose, ui.Snappy)
 }
 
 func tabStrip(c *ui.Context, label string, selected *int, labels []string, fixedWidth bool, enabled bool, change func()) {
 	tabs := ui.SegmentedBase(c, selected, len(labels))
-	tabs.Track.Label(label).Gap(5).Disabled(!enabled).OnChange(change).Children(func() {
+	segmentWidth := float32(58)
+	if !fixedWidth {
+		segmentWidth = 0
+		for _, text := range labels {
+			w, _ := c.MeasureText(0, ui.Span{Text: text, Size: 12})
+			segmentWidth = max(segmentWidth, w+22)
+		}
+	}
+	at := float32(*selected)
+	if !c.Preferences().ReduceMotion {
+		at = tabs.Track.AnimateTo("selected", at, ui.Animation{Duration: switchDuration})
+	}
+	tabs.Track.Label(label).Width(segmentWidth*float32(len(labels)) + 4).Height(30).Padding(2).Radius(controlRadius).
+		Disabled(!enabled).OnChange(change).Background(rail).Draw(func(p *ui.Painter, r ui.Rect) {
+		if !enabled {
+			return
+		}
+		capsule := ui.Rect{X: r.X + 2 + at*segmentWidth, Y: r.Y + 2, W: segmentWidth, H: r.H - 4}
+		p.Fill(capsule, raised, controlRadius-2)
+	}).Children(func() {
 		for i, text := range labels {
-			tab := tabs.Segment(i).Label(text).Height(30).Padding(0, 6).
-				Radius(controlRadius).FocusRing(true).Disabled(!enabled)
-			if fixedWidth {
-				tab.Width(58)
-			}
-			actionFace(c, tab, enabled)
+			tab := tabs.Segment(i).Label(text).Width(segmentWidth).Height(26).
+				Radius(controlRadius - 2).FocusRing(true).Disabled(!enabled)
 			active := i == *selected
 			tab.Children(func() {
 				color := muted
+				weight := 400
 				if active {
-					color = actionColor(enabled, true)
+					color = accent
+					weight = 600
 				} else if !enabled {
 					color = disabledInk
 				}
-				ui.Text(c, text).FontSize(12).TextColor(color).SingleLine()
+				ui.Text(c, text).FontSize(12).FontWeight(weight).TextColor(color).SingleLine()
 			})
-			if active {
-				tab.Children(func() {
-					indicator := ui.Box(c.Key("indicator")).Absolute().Left(6).Right(6).Bottom(0).Height(2).
-						Background(actionColor(enabled, true))
-					if !c.Preferences().ReduceMotion {
-						indicator.Transition(ui.ElementTransition{Duration: switchDuration, Position: true, Width: true, Match: label})
-					}
-				})
+			if enabled && !active && tab.Hovered() {
+				tab.Background(hoverFace.Alpha(.7))
 			}
 		}
 	})

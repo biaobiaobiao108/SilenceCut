@@ -112,6 +112,7 @@ type app struct {
 	progress                       float64
 	picking, closing, canceling    bool
 	settingsOpen, validateSettings bool
+	focusMode                      bool
 	refilter                       []*asset
 	refilterCount                  int
 	onlyKept, originalPreview      bool
@@ -124,6 +125,7 @@ type app struct {
 	selection                      timeline.Span
 	viewStart                      int64
 	viewLength                     int64
+	focusAt                        time.Time
 	waveDrag                       waveGesture
 	overviewDrag                   overviewGesture
 	waveColumns                    []timeline.Peak
@@ -148,8 +150,14 @@ func main() {
 		mygo.Theme.SetSource(mygo.ThemeDark)
 		state.win = mygo.NewWindow(mygo.WindowOptions{
 			Title: title, Width: 1180, Height: 790, MinWidth: 930, MinHeight: 690,
-			Content: ui.View(state.view),
+			TitleBarStyle:        mygo.TitleBarHidden,
+			TitleBarHeight:       topBarHeight,
+			TrafficLightPosition: &mygo.Point{X: 18, Y: 16},
+			Vibrancy:             mygo.VibrancySidebar,
+			BackgroundColor:      windowBackground,
+			Content:              ui.View(state.view),
 		})
+		state.win.SetWindowButtonsTheme(mygo.ThemeDark)
 		if runtime.GOOS == "windows" {
 			var icon bytes.Buffer
 			if err := png.Encode(&icon, appIcon.Image(128, 128, nil)); err != nil {

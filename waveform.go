@@ -24,7 +24,7 @@ const (
 var (
 	waveKeptInk    = ui.Hex("#8BC8B3")
 	waveRemovedInk = ui.Hex("#EB9B8F")
-	waveOverview   = ui.Hex("#7F9791")
+	waveOverview   = ui.Hex("#829A94")
 	overviewWindow = ui.Hex("#303C39")
 )
 
@@ -112,8 +112,8 @@ func (a *app) timeline(c *ui.Context) {
 	if duration > minLength {
 		zoom = math.Log(float64(duration)/float64(length)) / math.Log(float64(duration)/float64(minLength))
 	}
-	ui.Column(c.Key("timeline")).Grow(1).MinHeight(216).Gap(8).Children(func() {
-		ui.Row(c).AlignItems(ui.Center).Gap(8).Shrink(0).Children(func() {
+	ui.Column(c.Key("timeline")).Grow(1).MinHeight(300).Gap(10).Children(func() {
+		ui.Row(c).Height(32).AlignItems(ui.Center).Gap(10).Shrink(0).Children(func() {
 			mode := 0
 			if a.originalPreview {
 				mode = 1
@@ -123,37 +123,38 @@ func (a *app) timeline(c *ui.Context) {
 			ui.Spacer(c)
 			a.timelineReadout(c, duration, kept)
 		})
-		ui.Row(c).AlignItems(ui.Center).Gap(8).Shrink(0).Children(func() {
-			ui.Toolbar(c.Key("tools"), func() {
-				icon, label := iconPlay, "播放"
-				if a.player != nil && a.player.Playing() {
-					icon, label = iconPause, "暂停"
+		tools := ui.Row(c.Key("timeline-tools")).Height(40).AlignItems(ui.Center).Gap(2).Shrink(0).
+			Padding(0, 5).Radius(controlRadius).Background(surface).BorderColor(border).BorderWidth(1).Label("时间轴工具")
+		tools.Children(func() {
+			icon, label := iconPlay, "播放"
+			if a.player != nil && a.player.Playing() {
+				icon, label = iconPause, "暂停"
+			}
+			flatAction(c.Key("play"), label, playable, a.togglePlay).
+				Width(38).Tooltip(label + "（空格）").Children(func() {
+				glyph := ui.Icon(c, icon).Size(19, 19).TextColor(actionColor(playable, true))
+				if !c.Preferences().ReduceMotion {
+					glyph.ContentTransition(ui.ContentTransition{Animation: &ui.Animation{Duration: switchDuration}})
 				}
-				flatAction(c.Key("play"), label, playable, a.togglePlay).
-					Width(controlHeight).Tooltip(label + "（空格）").Children(func() {
-					glyph := ui.Icon(c, icon).Size(19, 19).TextColor(actionColor(playable, true))
-					if !c.Preferences().ReduceMotion {
-						glyph.ContentTransition(ui.ContentTransition{Animation: &ui.Animation{Duration: switchDuration}})
-					}
-				})
-				iconButton(c.Key("stop"), iconStop, "停止", "停止并回到开头", allowed && a.player != nil, false, func() {
-					a.stopPlayback()
-					a.viewStart = 0
-					a.seek(0)
-				})
-				ui.Divider(c).Height(16).AlignSelf(ui.Center).Margin(0, 3)
-				editable := allowed && current
-				iconButton(c.Key("keep"), iconKeep, "保留", "保留选区或当前片段", editable, false, func() { a.edit(true) })
-				iconButton(c.Key("discard"), iconDiscard, "移除", "移除选区或当前片段", editable, false, func() { a.edit(false) })
-				iconButton(c.Key("invert"), iconInvert, "反转短段", "从游标起反转最多 0.2 秒，止于当前片段边界",
-					editable && a.position < duration, false, a.invertAtPlayhead)
-				ui.Divider(c).Height(16).AlignSelf(ui.Center).Margin(0, 3)
-				iconButton(c.Key("undo"), iconUndo, "撤销", "撤销", allowed && item.history.CanUndo(), false, func() { a.history(false) })
-				iconButton(c.Key("redo"), iconRedo, "重做", "重做", allowed && item.history.CanRedo(), false, func() { a.history(true) })
-				iconButton(c.Key("sample-threshold"), iconSample, "采集游标处音量", "采集游标处音量作为自定义阈值",
-					allowed && len(item.peaks) > 0, false, a.sampleThreshold)
-			}).Label("时间轴工具").Grow(1).Gap(2).Padding(0)
-			ui.Row(c.Key("zoom-controls")).Gap(2).AlignItems(ui.Center).Shrink(0).Children(func() {
+			})
+			iconButton(c.Key("stop"), iconStop, "停止", "停止并回到开头", allowed && a.player != nil, false, func() {
+				a.stopPlayback()
+				a.viewStart = 0
+				a.seek(0)
+			})
+			ui.Divider(c).Height(16).AlignSelf(ui.Center).Margin(0, 3)
+			editable := allowed && current
+			iconButton(c.Key("keep"), iconKeep, "保留", "保留选区或当前片段", editable, false, func() { a.edit(true) })
+			iconButton(c.Key("discard"), iconDiscard, "移除", "移除选区或当前片段", editable, false, func() { a.edit(false) })
+			iconButton(c.Key("invert"), iconInvert, "反转短段", "从游标起反转最多 0.2 秒，止于当前片段边界",
+				editable && a.position < duration, false, a.invertAtPlayhead)
+			ui.Divider(c).Height(16).AlignSelf(ui.Center).Margin(0, 3)
+			iconButton(c.Key("undo"), iconUndo, "撤销", "撤销", allowed && item.history.CanUndo(), false, func() { a.history(false) })
+			iconButton(c.Key("redo"), iconRedo, "重做", "重做", allowed && item.history.CanRedo(), false, func() { a.history(true) })
+			iconButton(c.Key("sample-threshold"), iconSample, "采集游标处音量", "采集游标处音量作为自定义阈值",
+				allowed && len(item.peaks) > 0, false, a.sampleThreshold)
+			ui.Spacer(c)
+			ui.Row(c.Key("zoom-controls")).Gap(3).AlignItems(ui.Center).Shrink(0).Children(func() {
 				iconButton(c.Key("zoom-out"), iconZoomOut, "缩小波形", "缩小波形", length < duration, false,
 					func() { a.setZoom(length * 3 / 2) })
 				ui.Slider(c.Key("zoom"), &zoom, 0, 1).Width(64).Label("波形缩放").Disabled(duration <= minLength).
@@ -166,7 +167,7 @@ func (a *app) timeline(c *ui.Context) {
 		})
 		if item.info.Video && !item.offline {
 			ui.Box(c.Key("video-preview")).Grow(1.15).MinHeight(120).Center().
-				Radius(controlRadius).Background(screen).Clip().Children(func() {
+				Radius(surfaceRadius).Background(screen).BorderColor(border).BorderWidth(1).Clip().Children(func() {
 				ready := a.video != nil && a.video.Ready()
 				if a.video != nil {
 					// Building Video pumps the native decoder, including while it opens.
@@ -193,7 +194,8 @@ func (a *app) timeline(c *ui.Context) {
 			})
 		}
 		if duration == 0 {
-			ui.Column(c.Key("wave")).Grow(1).MinHeight(112).Padding(railInset).Background(waveBack).Center().Children(func() {
+			ui.Column(c.Key("wave")).Grow(1).MinHeight(112).Padding(railInset).Radius(surfaceRadius).
+				Background(waveBack).BorderColor(border).BorderWidth(1).Center().Children(func() {
 				switch {
 				case item.analyzing:
 					ui.Text(c, "正在分析素材…").FontSize(13).TextColor(muted)
@@ -203,7 +205,7 @@ func (a *app) timeline(c *ui.Context) {
 					ui.Text(c, "素材待分析").FontSize(13).TextColor(muted)
 				}
 			})
-			ui.Box(c.Key("overview")).Height(30).Shrink(0).Background(waveBack)
+			ui.Box(c.Key("overview")).Height(28).Shrink(0).Radius(controlRadius).Background(waveBack).BorderColor(border).BorderWidth(1)
 		} else {
 			a.wave(c, item, duration, allowed)
 			a.overview(c, item, duration, allowed)
@@ -240,7 +242,8 @@ func (a *app) invertAtPlayhead() {
 }
 
 func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
-	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Background(waveBack).Clip().
+	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Radius(surfaceRadius).Background(waveBack).
+		BorderColor(border).BorderWidth(1).Clip().
 		Focusable().FocusRing(true).Label("音频波形和播放位置").
 		Description("用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点")
 	clips := item.history.Clips
@@ -571,7 +574,8 @@ func playheadX(r ui.Rect, span timeline.Span, at int64) float32 {
 }
 
 func (a *app) overview(c *ui.Context, item *asset, duration int64, allowed bool) {
-	e := ui.Box(c.Key("overview")).Height(30).Shrink(0).Background(waveBack).Clip().Focusable().FocusRing(true).
+	e := ui.Box(c.Key("overview")).Height(28).Shrink(0).Radius(controlRadius).Background(waveBack).
+		BorderColor(border).BorderWidth(1).Clip().Focusable().FocusRing(true).
 		Label("全局波形").Tooltip("点击定位 · 拖动窗口浏览")
 	length := a.detailLength(duration)
 	if allowed {

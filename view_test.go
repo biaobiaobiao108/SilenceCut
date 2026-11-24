@@ -147,12 +147,15 @@ func TestCaptureVoiceWaveform(t *testing.T) {
 }
 
 func TestWorkspaceLayoutAndEdits(t *testing.T) {
-	for _, size := range [][2]int{{930, 690}, {1180, 790}, {1600, 900}} {
+	for _, size := range [][2]int{{930, 690}, {1120, 790}, {1180, 790}, {1600, 900}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			a := &app{opts: filterOptions{preset: "慢"}}
 			view := ui.NewTester(a.view, size[0], size[1])
-			if !view.HasText("拖入文件") {
+			if !view.HasText("拖入音视频") {
 				t.Fatal("empty workspace lacks its drop target")
+			}
+			if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
+				saveView(t, view, filepath.Join(folder, fmt.Sprintf("empty-%d.png", size[0])))
 			}
 			item := &asset{
 				path: "超长的测试素材名称用于检查列表行是否在窄窗口中正确省略.wav",
@@ -185,16 +188,7 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 				}
 			}
 			if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
-				path := filepath.Join(folder, fmt.Sprintf("workspace-%d.png", size[0]))
-				f, err := os.Create(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				err = png.Encode(f, view.Image())
-				closeErr := f.Close()
-				if err != nil || closeErr != nil {
-					t.Fatalf("capture: %v %v", err, closeErr)
-				}
+				saveView(t, view, filepath.Join(folder, fmt.Sprintf("workspace-%d.png", size[0])))
 			}
 			wave, _ := view.Find("音频波形和播放位置")
 			view.ClickAt(wave.X+wave.W/4, wave.Y+wave.H/2)
@@ -213,6 +207,9 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 					t.Fatal(err)
 				}
 				view.Advance(revealDuration + 20*time.Millisecond)
+				if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
+					saveView(t, view, filepath.Join(folder, fmt.Sprintf("settings-%d.png", size[0])))
+				}
 			}
 			if err := view.Click("自定义"); err != nil {
 				t.Fatal(err)
@@ -237,6 +234,90 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 				t.Fatalf("filtered view action: %v", err)
 			}
 		})
+	}
+}
+
+func saveView(t *testing.T, view *ui.Tester, path string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = png.Encode(f, view.Image())
+	closeErr := f.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("capture: %v %v", err, closeErr)
+	}
+}
+
+func TestTopbarClearsNativeWindowControls(t *testing.T) {
+	item := &asset{name: "项目旁白.wav", info: media.Info{Duration: 5 * timeline.Second}}
+	a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"}}
+	view := ui.NewTester(a.view, 930, 690)
+	for _, tc := range []struct {
+		name string
+		bar  ui.TitleBar
+	}{
+		{"windows", ui.TitleBar{Height: float32(topBarHeight), Right: 138}},
+		{"macos", ui.TitleBar{Height: float32(topBarHeight), Left: 70, Bottom: 28}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view.SetTitleBar(tc.bar)
+			view.Frame()
+			for _, label := range []string{"打开项目", "保存项目", "导出切片", "导出合并媒体"} {
+				r, ok := view.Find(label)
+				if !ok || r.W <= 0 || r.H <= 0 {
+					t.Fatalf("%s is not visible: %+v", label, r)
+				}
+				if r.X < tc.bar.Left || r.X+r.W > float32(930)-tc.bar.Right {
+					t.Fatalf("%s overlaps native window controls: %+v, bar %+v", label, r, tc.bar)
+				}
+			}
+		})
+	}
+}
+
+func TestFocusModeGivesTheWaveformRoom(t *testing.T) {
+	item := &asset{name: "口播.wav", info: media.Info{Duration: 5 * timeline.Second}}
+	a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"}}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	if err := view.Click("专注模式"); err != nil {
+		t.Fatal(err)
+	}
+	view.Advance(revealDuration + 20*time.Millisecond)
+	focused, _ := view.Find("音频波形和播放位置")
+	if focused.W <= wave.W+400 {
+		t.Fatalf("focus mode did not widen the waveform: before %.1f after %.1f", wave.W, focused.W)
+	}
+	if view.HasText("素材") {
+		t.Fatal("material rail remained visible in focus mode")
+	}
+	if view.HasText("仅修剪首尾") {
+		t.Fatal("filter inspector remained visible in focus mode")
+	}
+	if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
+		saveView(t, view, filepath.Join(folder, "focus-1180.png"))
+	}
+	if err := view.Click("专注模式"); err != nil {
+		t.Fatal(err)
+	}
+	view.Advance(revealDuration + 20*time.Millisecond)
+	restored, _ := view.Find("音频波形和播放位置")
+	if math.Abs(float64(restored.W-wave.W)) > 2 {
+		t.Fatalf("waveform did not return after focus mode: before %.1f after %.1f", wave.W, restored.W)
+	}
+
+	reduced := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"}}
+	reducedView := ui.NewTesterWith(reduced.view, 1180, 790, ui.TesterOptions{Preferences: ui.Preferences{ReduceMotion: true}})
+	before, _ := reducedView.Find("音频波形和播放位置")
+	if err := reducedView.Click("专注模式"); err != nil {
+		t.Fatal(err)
+	}
+	reducedView.Frame()
+	after, _ := reducedView.Find("音频波形和播放位置")
+	if after.W <= before.W+400 || reducedView.HasText("素材") {
+		t.Fatalf("reduced motion blocked focus mode: before %.1f after %.1f", before.W, after.W)
 	}
 }
 
@@ -417,14 +498,14 @@ func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
 		t.Fatal("expected only the invalid field's message")
 	}
 	selection := a.selection
-	view.SetSize(1080, 690)
+	view.SetSize(wideWorkspace, 690)
 	if _, ok := view.Find("重新过滤"); !ok || a.settingsOpen || a.opts.before != "错" ||
 		a.position != 700_000 || a.selection != selection || a.viewLength != 2*timeline.Second {
 		t.Fatal("crossing the breakpoint changed the draft or editor state")
 	}
-	view.SetSize(1079, 690)
+	view.SetSize(wideWorkspace-1, 690)
 	if _, ok := view.Find("重新过滤"); ok {
-		t.Fatal("settings rail was still present below 1080 DIP")
+		t.Fatal("settings rail was still present below the persistent breakpoint")
 	}
 	a.opts.before = "0.2"
 	first.history.Edit(timeline.Span{End: timeline.Second}, false)
