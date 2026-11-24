@@ -1,6 +1,7 @@
 #include "ffmpeg.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <libavcodec/avcodec.h>
@@ -8,6 +9,29 @@
 #include <libavutil/hwcontext.h>
 #include <libswresample/swresample.h>
 #include "input.h"
+
+struct CutCancel {
+    atomic_int canceled;
+};
+
+CutCancel *cut_cancel_new(void) {
+    CutCancel *cancel = av_malloc(sizeof(*cancel));
+    if (cancel) atomic_init(&cancel->canceled, 0);
+    return cancel;
+}
+
+void cut_cancel_set(CutCancel *cancel) {
+    atomic_store_explicit(&cancel->canceled, 1, memory_order_relaxed);
+}
+
+void cut_cancel_free(CutCancel *cancel) {
+    av_free(cancel);
+}
+
+static int cut_interrupted(void *opaque) {
+    CutCancel *cancel = opaque;
+    return atomic_load_explicit(&cancel->canceled, memory_order_relaxed);
+}
 
 static enum AVPixelFormat choose_format(AVCodecContext *ctx, const enum AVPixelFormat *formats) {
     CutInput *in = ctx->opaque;
@@ -54,7 +78,7 @@ static int open_decoder(AVStream *stream, AVCodecContext **ctx, CutInput *in, in
     return open_decoder(stream, ctx, in, 0);
 }
 
-CutInput *cut_open(const char *path, int mode, CutInfo *info, int *err) {
+CutInput *cut_open(const char *path, int mode, CutCancel *cancel, CutInfo *info, int *err) {
     CutInput *in = av_mallocz(sizeof(*in));
     if (!in) {
         *err = AVERROR(ENOMEM);
@@ -67,8 +91,14 @@ CutInput *cut_open(const char *path, int mode, CutInfo *info, int *err) {
     in->decoded = av_frame_alloc();
     in->audio = av_frame_alloc();
     in->last_video = av_frame_alloc();
-    if (!in->packet || !in->decoded || !in->audio || !in->last_video) {
+    in->format = avformat_alloc_context();
+    if (!in->packet || !in->decoded || !in->audio || !in->last_video || !in->format) {
         *err = AVERROR(ENOMEM);
+        goto fail;
+    }
+    if (cancel) in->format->interrupt_callback = (AVIOInterruptCB){cut_interrupted, cancel};
+    if (cancel && cut_interrupted(cancel)) {
+        *err = AVERROR_EXIT;
         goto fail;
     }
     AVDictionary *opts = NULL;
@@ -150,6 +180,8 @@ void cut_close(CutInput *in) {
 }
 
 static int seek_input(CutInput *in, int index, int64_t timestamp) {
+    AVIOInterruptCB *interrupt = &in->format->interrupt_callback;
+    if (interrupt->callback && interrupt->callback(interrupt->opaque)) return AVERROR_EXIT;
     int err = av_seek_frame(in->format, index, timestamp, AVSEEK_FLAG_BACKWARD);
     if (err < 0) return err;
     for (int i = 0; i < 2; i++)

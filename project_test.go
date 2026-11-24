@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"silencecut/internal/media"
@@ -64,6 +65,77 @@ func TestProjectRoundTrip(t *testing.T) {
 	}
 	if _, err := readProject(path); err == nil {
 		t.Fatal("a gap in the saved timeline must be rejected")
+	}
+}
+
+func TestProjectSaveRejectsStaleVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "项目.silencecut")
+	first := &app{opts: filterOptions{preset: "慢"}}
+	if err := first.saveProject(path, true); err != nil {
+		t.Fatal(err)
+	}
+	stale := &app{}
+	stale.openProject(path)
+	first.opts.preset = "快"
+	first.markProject()
+	if err := first.saveProject(path, false); err != nil {
+		t.Fatal(err)
+	}
+	stale.opts.ends = true
+	stale.markProject()
+	if err := stale.saveProject(path, false); !errors.Is(err, errProjectConflict) || !stale.projectDirty {
+		t.Fatalf("stale save = %v, dirty = %t", err, stale.projectDirty)
+	}
+	copyPath := filepath.Join(filepath.Dir(path), "副本.silencecut")
+	if err := stale.saveProject(copyPath, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path, preset string
+		ends         bool
+	}{{path, "快", false}, {copyPath, "慢", true}} {
+		doc, err := readProject(tc.path)
+		if err != nil || doc.Preset != tc.preset || doc.Ends != tc.ends {
+			t.Fatalf("read %s: %+v, %v", tc.path, doc, err)
+		}
+	}
+}
+
+func TestProjectConcurrentSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "项目.silencecut")
+	first, second := &app{}, &app{}
+	if err := first.saveProject(path, true); err != nil {
+		t.Fatal(err)
+	}
+	second.openProject(path)
+	first.opts.preset, second.opts.preset = "慢", "快"
+	first.markProject()
+	second.markProject()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	results := make(chan error, 2)
+	for _, editor := range []*app{first, second} {
+		workers.Go(func() {
+			<-start
+			results <- editor.saveProject(path, false)
+		})
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	saved, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			saved++
+		case errors.Is(err, errProjectConflict):
+			conflicts++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if saved != 1 || conflicts != 1 {
+		t.Fatalf("concurrent saves: %d committed, %d conflicts", saved, conflicts)
 	}
 }
 

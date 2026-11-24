@@ -106,9 +106,28 @@ func TestWAVRoundTrip(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel: %v", err)
 	}
+	if _, err := Export(ctx, path, dest, "过短", []timeline.Span{{End: 1}}, discardProgress); err == nil {
+		t.Fatal("sub-sample selection should fail before publishing a WAV")
+	}
 	files, err := filepath.Glob(filepath.Join(dest, "*"))
 	if err != nil || !reflect.DeepEqual(files, []string{two, one}) {
 		t.Fatalf("unexpected output directory: %v %v", files, err)
+	}
+}
+
+func TestCancelWaveformAndPadding(t *testing.T) {
+	source := toneFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if _, _, err := Waveform(ctx, source, func(float64) { cancel() }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel analysis during decode: %v", err)
+	}
+	if _, _, err := Waveform(ctx, "missing.wav", discardProgress); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel analysis before opening a file: %v", err)
+	}
+	writer := audioWriter{ctx: ctx}
+	if err := writer.silence(1_000_000); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel while padding audio: %v", err)
 	}
 }
 
@@ -437,31 +456,42 @@ func TestVideoCut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating fixture: %v %s", err, output)
 	}
-	spans := []timeline.Span{{Start: 342000, End: 713000}, {Start: 1123000, End: 1434000}}
-	path, err := Export(context.Background(), source, dir, "cut", spans, discardProgress)
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err = exec.Command(ffprobe, "-v", "error", "-show_entries", "stream=codec_name,duration", "-of", "csv=p=0", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("checking result: %v %s", err, output)
-	}
-	lines := strings.Fields(string(output))
-	for _, codec := range []string{"h264", "aac"} {
-		found := false
-		for _, line := range lines {
-			name, raw, _ := strings.Cut(line, ",")
-			if name == codec {
-				value, err := strconv.ParseFloat(raw, 64)
-				if err != nil || math.Abs(value-.682) > .034 {
-					t.Fatalf("%s stream duration: %s (%v)", codec, raw, err)
-				}
-				found = true
+	for _, test := range []struct {
+		name  string
+		spans []timeline.Span
+		want  float64
+	}{
+		{"joined", []timeline.Span{{Start: 342000, End: 713000}, {Start: 1123000, End: 1434000}}, .682},
+		{"partial frame", []timeline.Span{{Start: 500000, End: 510000}}, .010},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path, err := Export(t.Context(), source, dir, "cut", test.spans, discardProgress)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		if !found {
-			t.Fatalf("missing %s: %s", codec, output)
-		}
+			output, err := exec.Command(ffprobe, "-v", "error", "-show_entries", "stream=codec_name,duration", "-of", "csv=p=0", path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("checking result: %v %s", err, output)
+			}
+			lines := strings.Fields(string(output))
+			for _, codec := range []string{"h264", "aac"} {
+				found := false
+				for _, line := range lines {
+					name, raw, _ := strings.Cut(line, ",")
+					if name != codec {
+						continue
+					}
+					value, err := strconv.ParseFloat(raw, 64)
+					if err != nil || math.Abs(value-test.want) > .001 {
+						t.Fatalf("%s stream duration: %s, want %.3f (%v)", codec, raw, test.want, err)
+					}
+					found = true
+				}
+				if !found {
+					t.Fatalf("missing %s: %s", codec, output)
+				}
+			}
+		})
 	}
 }
 

@@ -6,6 +6,7 @@ package media
 import "C"
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync/atomic"
@@ -36,7 +37,7 @@ func OpenAudio(path string) (*AudioDecoder, error) {
 }
 
 func openAudioInput(path string) (*C.CutInput, Info, error) {
-	in, info, err := open(path, C.CUT_AUDIO_ONLY)
+	in, info, err := open(context.Background(), path, C.CUT_AUDIO_ONLY, nil)
 	if err == nil && info.Channels > 2 {
 		// Mygo's mixer takes up to two channels. Mix surround channels
 		// before handing it PCM so center-channel dialogue remains audible.

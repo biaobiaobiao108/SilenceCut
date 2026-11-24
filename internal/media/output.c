@@ -24,7 +24,7 @@ struct CutOutput {
     SwrContext *resample;
     SwsContext *scale, *tone_map;
     enum AVColorTransferCharacteristic source_transfer;
-    int64_t audio_pts, video_pts;
+    int64_t audio_pts, video_pts, video_end, video_final_pts, duration;
     int source_channels;
 };
 
@@ -146,13 +146,15 @@ static int add_video(CutOutput *out, CutInput *in) {
     return direct ? 0 : av_frame_get_buffer(out->picture, 0);
 }
 
-CutOutput *cut_create(CutInput *in, const char *path, int *err, int *video_error) {
+CutOutput *cut_create(CutInput *in, const char *path, int64_t duration, int *err, int *video_error) {
     CutOutput *out = av_mallocz(sizeof(*out));
     if (!out) {
         *err = AVERROR(ENOMEM);
         return NULL;
     }
     out->video_pts = AV_NOPTS_VALUE;
+    out->video_final_pts = AV_NOPTS_VALUE;
+    out->duration = duration;
     out->packet = av_packet_alloc();
     if (!out->packet) {
         *err = AVERROR(ENOMEM);
@@ -165,9 +167,12 @@ CutOutput *cut_create(CutInput *in, const char *path, int *err, int *video_error
         *video_error = CUT_VIDEO_ENCODE_ERROR;
         goto fail;
     }
+    if (video) out->video_end = av_rescale_q(duration, AV_TIME_BASE_Q, out->video->time_base);
     if ((*err = add_audio(out, in, video)) < 0) goto fail;
     if (!video) av_opt_set(out->format->priv_data, "rf64", "auto", 0);
-    if ((*err = avio_open(&out->format->pb, path, AVIO_FLAG_WRITE)) < 0) goto fail;
+    out->format->interrupt_callback = in->format->interrupt_callback;
+    if ((*err = avio_open2(&out->format->pb, path, AVIO_FLAG_WRITE,
+                           &out->format->interrupt_callback, NULL)) < 0) goto fail;
     AVDictionary *opts = NULL;
     if (video && (out->video->color_primaries != AVCOL_PRI_UNSPECIFIED ||
                   out->video->color_trc != AVCOL_TRC_UNSPECIFIED ||
@@ -193,6 +198,12 @@ static int encode(CutOutput *out, AVCodecContext *codec, AVStream *stream, AVFra
         if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) return 0;
         if (err < 0) return err;
         out->packet->stream_index = stream->index;
+        // Native encoders may emit a full-frame duration for a partial final frame.
+        if (codec == out->video && out->packet->pts != AV_NOPTS_VALUE) {
+            int64_t remaining = FFMAX(1, out->video_end - out->packet->pts);
+            if (out->packet->pts == out->video_final_pts || out->packet->duration > remaining)
+                out->packet->duration = remaining;
+        }
         av_packet_rescale_ts(out->packet, codec->time_base, stream->time_base);
         err = av_interleaved_write_frame(out->format, out->packet);
         if (err < 0) {
@@ -386,6 +397,7 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
     dest->pts = av_rescale_q(pts, AV_TIME_BASE_Q, v->time_base);
     if (out->video_pts != AV_NOPTS_VALUE && dest->pts <= out->video_pts) dest->pts = out->video_pts + 1;
     out->video_pts = dest->pts;
+    if (pts + duration == out->duration) out->video_final_pts = dest->pts;
     dest->duration = FFMAX(1, av_rescale_q(duration, AV_TIME_BASE_Q, v->time_base));
     return encode(out, out->video, out->video_stream, dest, video_error);
 }

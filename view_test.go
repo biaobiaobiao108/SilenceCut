@@ -869,6 +869,15 @@ func TestWaveContextMenu(t *testing.T) {
 	if a.position != afterClick || !slices.Equal(view.Menu(), wantCurrent) {
 		t.Fatalf("keyboard menu moved %d to %d or opened %q", afterClick, a.position, view.Menu())
 	}
+	view.Key(0, ui.KeyEscape)
+	_, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	a.cancel = cancel
+	view.Frame()
+	view.RightClickAt(x(8), body)
+	if a.position != afterClick {
+		t.Fatalf("busy right-click moved playhead from %d to %d", afterClick, a.position)
+	}
 }
 
 func TestContextMenusStayOffOverviewAndEmptyWorkspace(t *testing.T) {

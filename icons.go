@@ -120,7 +120,7 @@ func actionFace(c *ui.Context, e ui.Element, enabled bool) {
 	e.AnimatePose(pose, ui.Snappy)
 }
 
-func tabStrip(c *ui.Context, label string, selected *int, labels []string, fixedWidth bool, enabled bool, change func()) {
+func tabStrip(c *ui.Context, label string, selected *int, labels []string, fixedWidth bool, enabled bool, change func()) ui.Element {
 	tabs := ui.SegmentedBase(c, selected, len(labels))
 	segmentWidth := float32(58)
 	if !fixedWidth {
@@ -162,4 +162,5 @@ func tabStrip(c *ui.Context, label string, selected *int, labels []string, fixed
 			}
 		}
 	})
+	return tabs.Track
 }

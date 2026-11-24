@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 const projectExt = ".silencecut"
 
 var projectTypes = []mygo.FileFilter{{Name: "SilenceCut 项目", Extensions: []string{"silencecut"}}}
+
+var errProjectConflict = errors.New("项目文件在打开后已改变")
 
 type sourceStamp struct {
 	Size     int64     `json:"size"`
@@ -48,6 +51,7 @@ type projectAsset struct {
 type projectDocument struct {
 	Version         int            `json:"version"`
 	Project         string         `json:"recover_project,omitempty"`
+	BaseRevision    string         `json:"recover_revision,omitempty"`
 	Assets          []projectAsset `json:"assets"`
 	Preset          string         `json:"preset"`
 	Level           string         `json:"level"`
@@ -89,12 +93,18 @@ func (a *app) snapshot(path string) projectDocument {
 }
 
 func writeProject(path string, doc projectDocument) error {
+	_, err := saveProjectFile(path, doc, replaceProject)
+	return err
+}
+
+func saveProjectFile(path string, doc projectDocument, publish func(string, string) error) (string, error) {
 	f, err := os.CreateTemp(filepath.Dir(path), ".silencecut-project-*")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.Remove(f.Name())
-	encoder := json.NewEncoder(f)
+	digest := sha256.New()
+	encoder := json.NewEncoder(io.MultiWriter(f, digest))
 	encoder.SetIndent("", "  ")
 	err = encoder.Encode(doc)
 	if err == nil {
@@ -104,36 +114,75 @@ func writeProject(path string, doc projectDocument) error {
 		err = closeErr
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	return replaceProject(f.Name(), path)
+	if err := publish(f.Name(), path); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil)), nil
 }
 
 func readProject(path string) (projectDocument, error) {
+	doc, _, err := readProjectVersion(path)
+	return doc, err
+}
+
+func readProjectVersion(path string) (projectDocument, string, error) {
 	var doc projectDocument
 	f, err := os.Open(path)
 	if err != nil {
-		return doc, err
+		return doc, "", err
 	}
 	defer f.Close()
-	decoder := json.NewDecoder(f)
+	digest := sha256.New()
+	decoder := json.NewDecoder(io.TeeReader(f, digest))
 	if err := decoder.Decode(&doc); err != nil {
-		return doc, err
+		return doc, "", err
 	}
 	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
-		return doc, errors.New("项目文件含有多余内容")
+		return doc, "", errors.New("项目文件含有多余内容")
 	}
 	if doc.Version != 1 {
-		return doc, fmt.Errorf("不支持项目文件版本 %d", doc.Version)
+		return doc, "", fmt.Errorf("不支持项目文件版本 %d", doc.Version)
 	}
 	for _, item := range doc.Assets {
 		if item.Path == "" || item.Info.Duration < 0 || item.Info.Duration > int64((1<<63-1)/time.Microsecond) ||
 			item.Info.Duration > 0 && (item.Info.Rate <= 0 || item.Info.Channels <= 0) ||
 			!validProjectClips(item.Clips, item.Info.Duration) || !validProjectClips(item.Filtered, item.Info.Duration) {
-			return doc, fmt.Errorf("素材记录无效 · %s", item.Path)
+			return doc, "", fmt.Errorf("素材记录无效 · %s", item.Path)
 		}
 	}
-	return doc, nil
+	return doc, fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+func replaceProjectVersion(from, path, revision string) error {
+	if revision == "" {
+		return errProjectConflict
+	}
+	lock, err := lockProjectSave(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return errProjectConflict
+	}
+	if err != nil {
+		return err
+	}
+	digest := sha256.New()
+	_, err = io.Copy(digest, f)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if fmt.Sprintf("%x", digest.Sum(nil)) != revision {
+		return errProjectConflict
+	}
+	return replaceProject(from, path)
 }
 
 func validProjectClips(clips []timeline.Clip, duration int64) bool {
@@ -180,6 +229,7 @@ func (a *app) writeRecovery() error {
 	}
 	doc := a.snapshot("")
 	doc.Project = a.projectPath
+	doc.BaseRevision = a.projectRevision
 	return writeProject(a.recovery.file.Name()+projectExt, doc)
 }
 
@@ -273,7 +323,7 @@ func (a *app) offerRecovery(previous *recoveryFile) {
 	a.projectPrompt("恢复上次编辑？", "发现上次退出时留下的未保存项目。", []string{"恢复", "丢弃", "稍后"}, func(choice int) {
 		discard := choice == 1
 		if choice == 0 {
-			a.loadProject(doc, doc.Project, true)
+			a.loadProject(doc, doc.Project, doc.BaseRevision, true)
 			discard = a.recovery != nil && a.writeRecovery() == nil
 		}
 		previous.close(discard)
@@ -321,32 +371,56 @@ func (a *app) chooseSaveProject(done func()) {
 	if a.busy() || a.projectPath == "" && len(a.assets) == 0 && !a.projectDirty {
 		return
 	}
-	save := func(path string) {
-		path, err := filepath.Abs(path)
-		if err != nil {
+	if a.projectPath != "" {
+		err := a.saveProject(a.projectPath, false)
+		switch {
+		case errors.Is(err, errProjectConflict):
+			a.projectPrompt("项目文件已改变", "当前编辑仍在工作区。请另存为新项目。", []string{"另存为…", "取消"}, func(choice int) {
+				if choice == 0 {
+					a.chooseNewProjectPath(done)
+				}
+			})
+		case err != nil:
 			a.status = "无法保存项目 · " + err.Error()
-			return
-		}
-		if err := writeProject(path, a.snapshot(path)); err != nil {
-			a.status = "无法保存项目 · " + err.Error()
-			return
-		}
-		a.projectPath, a.projectDirty = path, false
-		a.clearRecovery()
-		a.refreshProjectTitle()
-		a.status = "已保存项目 · " + filepath.Base(path)
-		if done != nil {
+		case done != nil:
 			done()
 		}
-	}
-	if a.projectPath != "" {
-		save(a.projectPath)
 		return
+	}
+	a.chooseNewProjectPath(done)
+}
+
+func (a *app) saveProject(path string, create bool) error {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	publish := createProject
+	if !create {
+		publish = func(from, to string) error {
+			return replaceProjectVersion(from, to, a.projectRevision)
+		}
+	}
+	revision, err := saveProjectFile(path, a.snapshot(path), publish)
+	if err != nil {
+		return err
+	}
+	a.projectPath, a.projectRevision, a.projectDirty = path, revision, false
+	a.clearRecovery()
+	a.refreshProjectTitle()
+	a.status = "已保存项目 · " + filepath.Base(path)
+	return nil
+}
+
+func (a *app) chooseNewProjectPath(done func()) {
+	defaultPath := "未命名" + projectExt
+	if a.projectPath != "" {
+		defaultPath = strings.TrimSuffix(a.projectPath, filepath.Ext(a.projectPath)) + " 副本" + projectExt
 	}
 	a.picking = true
 	a.async(func() {
 		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
-			Parent: a.win, Title: "保存项目", DefaultPath: "未命名" + projectExt, Filters: projectTypes,
+			Parent: a.win, Title: "保存项目", DefaultPath: defaultPath, Filters: projectTypes,
 		})
 		a.win.Update(func() {
 			a.picking = false
@@ -358,12 +432,14 @@ func (a *app) chooseSaveProject(done func()) {
 			} else if path != "" {
 				if !isProject(path) {
 					path += projectExt
-					if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-						a.status = "文件已存在 · " + filepath.Base(path)
-						return
-					}
 				}
-				save(path)
+				if err := a.saveProject(path, true); err != nil {
+					a.status = "无法保存项目 · " + err.Error()
+					return
+				}
+				if done != nil {
+					done()
+				}
 			}
 		})
 	})
@@ -389,12 +465,14 @@ func (a *app) openProject(path string) {
 		a.status = "无法打开项目 · " + err.Error()
 		return
 	}
-	doc, err := readProject(path)
-	if err != nil {
-		a.status = "无法打开项目 · " + err.Error()
-		return
-	}
-	a.guardProject(func() { a.loadProject(doc, path, false) })
+	a.guardProject(func() {
+		doc, revision, err := readProjectVersion(path)
+		if err != nil {
+			a.status = "无法打开项目 · " + err.Error()
+			return
+		}
+		a.loadProject(doc, path, revision, false)
+	})
 }
 
 func (a *app) refreshProjectTitle() {
@@ -408,10 +486,10 @@ func (a *app) refreshProjectTitle() {
 	}
 }
 
-func (a *app) loadProject(doc projectDocument, path string, recovered bool) {
+func (a *app) loadProject(doc projectDocument, path, revision string, recovered bool) {
 	a.closePreview()
 	a.clearRecovery()
-	a.projectPath, a.projectDirty = path, recovered
+	a.projectPath, a.projectRevision, a.projectDirty = path, revision, recovered
 	a.refreshProjectTitle()
 	a.assets, a.selected = nil, nil
 	a.opts = filterOptions{preset: doc.Preset, level: doc.Level, before: doc.Before, after: doc.After, ends: doc.Ends}
@@ -501,6 +579,10 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 				bad++
 			}
 			wave := timeline.BuildWaveform(peaks)
+			var automatic float64
+			if err == nil && relink != "" {
+				automatic = timeline.AutomaticThreshold(peaks)
+			}
 			a.win.Update(func() {
 				item.pendingLoad = false
 				if err != nil {
@@ -516,6 +598,7 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 					item.issue = "首次过滤未完成，请重新过滤"
 				}
 				if relink != "" {
+					item.automatic = automatic
 					a.markProject()
 				}
 			})

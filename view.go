@@ -428,7 +428,13 @@ func (a *app) previewTick(c *ui.Context) {
 		}
 	}
 	if a.updatePlaybackPosition() {
-		c.After(16 * time.Millisecond)
+		delay := previewTickInterval
+		if a.selected.info.Video && !a.originalPreview && a.videoSeekAt.IsZero() {
+			if cut, ok := upcomingVideoCut(a.selected.history.Clips, a.position); ok {
+				delay = min(delay, time.Duration(cut.Start-a.position)*time.Microsecond)
+			}
+		}
+		c.After(delay)
 	}
 }
 

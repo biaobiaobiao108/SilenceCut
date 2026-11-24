@@ -13,6 +13,10 @@ env:
   SILENCECUT_VERSION: ${{ github.ref_name }}
 
 jobs:
+  test-release:
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.event.created
+    uses: ./.github/workflows/ci.yml
+
   windows:
     name: Windows amd64
     if: github.event_name == 'workflow_dispatch' || !github.event.deleted
@@ -108,7 +112,7 @@ jobs:
   release:
     name: Publish GitHub Release
     if: github.event_name == 'push' && github.ref_type == 'tag' && github.event.created
-    needs: [verify-windows, verify-macos]
+    needs: [test-release, verify-windows, verify-macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

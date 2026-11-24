@@ -48,7 +48,34 @@ func avError(action string, code C.int) error {
 	return fmt.Errorf("%s（%s）", action, C.GoString(&buf[0]))
 }
 
-func open(path string, mode C.int) (*C.CutInput, Info, error) {
+func mediaCancellation(ctx context.Context) (*C.CutCancel, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if ctx.Done() == nil {
+		return nil, func() {}, nil
+	}
+	token := C.cut_cancel_new()
+	if token == nil {
+		return nil, nil, errors.New("无法初始化媒体任务")
+	}
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		C.cut_cancel_set(token)
+		close(done)
+	})
+	return token, func() {
+		if !stop() {
+			<-done
+		}
+		C.cut_cancel_free(token)
+	}, nil
+}
+
+func open(ctx context.Context, path string, mode C.int, token *C.CutCancel) (*C.CutInput, Info, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, Info{}, err
+	}
 	stat, err := os.Stat(path)
 	if err != nil {
 		return nil, Info{}, err
@@ -60,7 +87,11 @@ func open(path string, mode C.int) (*C.CutInput, Info, error) {
 	defer C.free(unsafe.Pointer(name))
 	var metadata C.CutInfo
 	var code C.int
-	input := C.cut_open(name, mode, &metadata, &code)
+	input := C.cut_open(name, mode, token, &metadata, &code)
+	if err := ctx.Err(); err != nil {
+		C.cut_close(input)
+		return nil, Info{}, err
+	}
 	if input == nil {
 		return nil, Info{}, avError("无法读取素材", code)
 	}
@@ -77,7 +108,12 @@ func open(path string, mode C.int) (*C.CutInput, Info, error) {
 }
 
 func Waveform(ctx context.Context, path string, progress Progress) (Info, []timeline.Peak, error) {
-	in, info, err := open(path, C.CUT_AUDIO_ONLY)
+	token, release, err := mediaCancellation(ctx)
+	if err != nil {
+		return Info{}, nil, err
+	}
+	defer release()
+	in, info, err := open(ctx, path, C.CUT_AUDIO_ONLY, token)
 	if err != nil {
 		return Info{}, nil, err
 	}
@@ -116,7 +152,12 @@ func Waveform(ctx context.Context, path string, progress Progress) (Info, []time
 }
 
 func Detect(ctx context.Context, path string, settings timeline.Settings, progress Progress) ([]timeline.Clip, error) {
-	in, info, err := open(path, C.CUT_AUDIO_ONLY)
+	token, release, err := mediaCancellation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	in, info, err := open(ctx, path, C.CUT_AUDIO_ONLY, token)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +242,9 @@ func frames(ctx context.Context, in *C.CutInput, process func(C.int, *C.CutFrame
 		}
 		var frame C.CutFrame
 		kind := C.cut_next(in, &frame)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		switch {
 		case kind < 0:
 			if frame.seek_error != 0 {
@@ -245,9 +289,11 @@ func pipelineError(action string, code, video C.int) error {
 var errGapSeek = errors.New("定位后无法恢复完整的音视频区间")
 
 func export(ctx context.Context, source, dir, base string, spans []timeline.Span, software, skipGaps bool, progress Progress) (string, error) {
-	if err := ctx.Err(); err != nil {
+	token, release, err := mediaCancellation(ctx)
+	if err != nil {
 		return "", err
 	}
+	defer release()
 	if len(spans) == 0 {
 		return "", errors.New("没有要导出的区间")
 	}
@@ -257,7 +303,7 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 	if software {
 		mode = C.CUT_SOFTWARE
 	}
-	in, info, err := open(source, mode)
+	in, info, err := open(ctx, source, mode, token)
 	if err != nil {
 		return "", err
 	}
@@ -266,6 +312,7 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 	audioRanges := make([]outputSpan, 0, len(spans))
 	videoRanges := make([]outputSpan, 0, len(spans))
 	var duration int64
+	var hasAudioSamples bool
 	for _, span := range spans {
 		if span.Start < previous || span.End <= span.Start || span.End > info.Duration {
 			return "", errors.New("区间超出素材范围，请重新导入")
@@ -275,8 +322,12 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 		outputStart := sampleIndex(duration, info.Rate)
 		duration += span.End - span.Start
 		length := sampleIndex(duration, info.Rate) - outputStart
+		hasAudioSamples = hasAudioSamples || end > start && length > 0
 		audioRanges = append(audioRanges, outputSpan{start, end, outputStart, length})
 		previous = span.End
+	}
+	if !hasAudioSamples {
+		return "", errors.New("导出区间太短，没有完整的音频样本")
 	}
 
 	ext := Extension(info)
@@ -327,7 +378,7 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 			fmt.Fprintf(os.Stderr, "SilenceCut export retry: mode=%d indexed-seek=%t cause=%v\n", mode, skipGaps, err)
 		}
 		var retryInfo Info
-		in, retryInfo, err = open(source, mode)
+		in, retryInfo, err = open(ctx, source, mode, token)
 		if err != nil {
 			return "", err
 		}
@@ -337,6 +388,9 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 		return "", err
 	}
 	for index := 1; ; index++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		name := base
 		if index > 1 {
 			name = fmt.Sprintf("%s (%d)", base, index)
@@ -357,13 +411,14 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, skipGap
 	name := C.CString(path)
 	defer C.free(unsafe.Pointer(name))
 	var code, videoError C.int
-	out := C.cut_create(in, name, &code, &videoError)
+	tail := videoRanges[len(videoRanges)-1]
+	out := C.cut_create(in, name, C.int64_t(tail.output+tail.length), &code, &videoError)
 	if out == nil {
 		return pipelineError("无法创建导出文件", code, videoError)
 	}
 	defer C.cut_discard(out)
 	first, last := videoRanges[0].start, videoRanges[len(videoRanges)-1].end
-	audio, video := audioWriter{out: out, ranges: audioRanges, channels: info.Channels}, 0
+	audio, video := audioWriter{ctx: ctx, out: out, ranges: audioRanges, channels: info.Channels}, 0
 	var pictureTime int64
 	var hasPicture bool
 	var jumps, decodedVideo int
@@ -400,6 +455,9 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, skipGap
 			span := videoRanges[video]
 			start, stop := max(pictureTime, span.start), min(end, span.end)
 			if stop > start {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				if code := C.cut_video(out, in, C.int64_t(span.output+start-span.start), C.int64_t(stop-start), &videoError); code < 0 {
 					return pipelineError("视频编码失败", code, videoError)
 				}
@@ -508,6 +566,7 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, skipGap
 }
 
 type audioWriter struct {
+	ctx      context.Context
 	out      *C.CutOutput
 	ranges   []outputSpan
 	channels int
@@ -546,6 +605,9 @@ func (a *audioWriter) write(start int64, frame *C.CutFrame) error {
 
 func (a *audioWriter) silence(samples int64) error {
 	for samples > 0 {
+		if err := a.ctx.Err(); err != nil {
+			return err
+		}
 		n := min(samples, 32768)
 		if code := C.cut_audio(a.out, nil, C.int(n)); code < 0 {
 			return avError("无法补齐音频", code)

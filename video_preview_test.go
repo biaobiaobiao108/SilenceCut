@@ -99,3 +99,16 @@ func TestOriginalVideoUsesSourceClock(t *testing.T) {
 		t.Fatalf("original playback should play removed intervals, got %d", a.position)
 	}
 }
+
+func TestFilteredVideoAnticipatesCutBetweenUpdates(t *testing.T) {
+	item := &asset{info: media.Info{Duration: 2 * timeline.Second, Video: true}, history: timeline.History{Clips: []timeline.Clip{
+		{Span: timeline.Span{End: timeline.Second}, Keep: true},
+		{Span: timeline.Span{Start: timeline.Second, End: 1_005_000}},
+		{Span: timeline.Span{Start: 1_005_000, End: 2 * timeline.Second}, Keep: true},
+	}}}
+	p := &testPreviewPlayer{at: 995 * time.Millisecond, playing: true}
+	a := &app{selected: item, player: p}
+	if !a.updatePlaybackPosition() || len(p.seeks) != 1 || p.seeks[0] != 1005*time.Millisecond {
+		t.Fatalf("expected a seek before the short cut passes between frames, got %v", p.seeks)
+	}
+}

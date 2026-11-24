@@ -182,8 +182,11 @@ func (a *app) timeline(c *ui.Context) {
 			if a.originalPreview {
 				mode = 1
 			}
-			tabStrip(c.Key("preview-mode"), "试听模式", &mode, []string{"过滤后", "原始"}, true, allowed,
+			tabs := tabStrip(c.Key("preview-mode"), "试听模式", &mode, []string{"过滤后", "原始"}, true, allowed,
 				func() { a.setPreviewMode(mode == 1) })
+			if item.info.Video {
+				tabs.Description("过滤后试听使用系统播放器近似跳过切点，精确结果以导出文件为准")
+			}
 			ui.Spacer(c)
 			a.timelineReadout(c, duration, kept)
 		})
@@ -342,7 +345,7 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	w := e.Bounds().W
 	e.HandleInput(func(ev ui.InputEvent) bool {
 		if ev.Kind == ui.InputPointerDown && ev.Button == 1 && duration > 0 {
-			if width := waveHandle.Bounds(c).W; width > 0 {
+			if width := waveHandle.Bounds(c).W; !a.busy() && a.selected == item && width > 0 {
 				at := span.Start + int64(math.Round(float64(max(0, min(ev.X/width, 1)))*float64(length)))
 				a.seek(at)
 			}

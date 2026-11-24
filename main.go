@@ -132,6 +132,7 @@ type app struct {
 	waveColumns                    []timeline.Peak
 	overviewColumns                []timeline.Peak
 	projectPath                    string
+	projectRevision                string
 	projectDirty, closeApproved    bool
 	closePending                   bool
 	recovery                       *recoveryFile
@@ -798,6 +799,16 @@ func nextRetained(clips []timeline.Clip, at int64) (int64, bool) {
 	return 0, false
 }
 
+const previewTickInterval = 16 * time.Millisecond
+
+func upcomingVideoCut(clips []timeline.Clip, at int64) (timeline.Span, bool) {
+	i := clipAt(clips, at)
+	if i+1 < len(clips) && clips[i].Keep && !clips[i+1].Keep {
+		return clips[i+1].Span, true
+	}
+	return timeline.Span{}, false
+}
+
 func (a *app) updatePlaybackPosition() bool {
 	if a.player == nil {
 		return false
@@ -829,13 +840,23 @@ func (a *app) updatePlaybackPosition() bool {
 	if a.selected.info.Video && !a.originalPreview {
 		clips := a.selected.history.Clips
 		if len(clips) > 0 {
+			cutPosition := position
+			// A complete short cut could otherwise fit between two UI
+			// updates. Request that seek before entering the removed range.
+			if playing {
+				if cut, ok := upcomingVideoCut(clips, position); ok &&
+					cut.End-cut.Start <= previewTickInterval.Microseconds() &&
+					cut.Start-position <= previewTickInterval.Microseconds() {
+					cutPosition = cut.Start
+				}
+			}
 			last := clips[len(clips)-1]
-			if !last.Keep && position >= last.Start {
+			if !last.Keep && cutPosition >= last.Start {
 				a.stopPlayback()
 				a.seek(last.Start)
 				position, playing = last.Start, false
 			} else if playing {
-				if target, ok := nextRetained(clips, position); ok && target > position {
+				if target, ok := nextRetained(clips, cutPosition); ok && target > cutPosition {
 					a.seek(target)
 					position = target
 				}
