@@ -11,14 +11,14 @@
 - **导出合并媒体**为每个有保留区间的素材生成一个文件。
 - **导出切片**将区间分别写入素材的切片文件夹。勾选「切片仅导出保留段」可省略移除区间。
 - 视频导出为 H.264/AAC MP4，HDR 素材会进行色调映射并输出为 SDR。音频导出为 24 位 PCM WAV。选用第一条音轨，视频输出最多保留两个声道。过滤、预览与导出都在本机运行。
-- Windows 10/11 amd64 解压后双击 `SilenceCut.exe`。Windows N 版需要系统的 Media Feature Pack。
-- Apple Silicon（arm64）macOS 14+ 解压后运行 `SilenceCut.app`。本地构建包使用临时签名，公开分发需使用开发者签名和公证。
+- Windows 10/11 amd64 运行 `SilenceCut-windows-x64-setup.exe`，安装后从开始菜单打开 SilenceCut。Windows N 版需要系统的 Media Feature Pack。
+- Apple Silicon（arm64）macOS 14+ 打开 `SilenceCut-macos-arm64.pkg`，安装后从「应用程序」打开 SilenceCut。当前安装包未签名和公证，安装时可能需要在「系统设置 → 隐私与安全性」中手动允许。
 - 视频导出和预览转码默认启用硬件加速。Windows 使用 D3D11VA 和 Media Foundation，macOS 使用 VideoToolbox。兼容的帧直接交给编码器，支持时在设备上缩放。驱动或编码配置不支持时自动回退到可用路径。
 - MP4 和 MOV 导出遇到较长的移除段时，会在索引可用的情况下跳到下一段附近的关键帧，再精确处理切点。定位后无法读到完整区间时，自动改用顺序解码。音频解码、静音检测、波形分析和音频导出由 CPU 处理。
 
 ## 从源码构建
 
-需要 Go 1.27.4。Windows 使用带 GCC、GNU Make 和标准 Unix 命令的 Git Bash / MinGW 环境。macOS 使用 Xcode Command Line Tools。脚本固定 FFmpeg 8.1.3 并核对源码包 SHA-256。
+需要 Go 1.27.4。Windows 使用带 GCC、GNU Make 和标准 Unix 命令的 Git Bash / MinGW 环境，生成安装包还需要 Inno Setup 6。自定义安装位置可通过 `ISCC` 指定编译器 `ISCC.exe` 的路径。macOS 使用 Xcode Command Line Tools。脚本固定 FFmpeg 8.1.3 并核对源码包 SHA-256。
 
 Windows，在 Git Bash 中运行
 

@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SILENCECUT_VERSION: ${{ github.ref_name }}
+
 jobs:
   windows:
     name: Windows amd64
@@ -35,7 +38,7 @@ jobs:
           sh scripts/package.sh
       - uses: actions/upload-artifact@v7
         with:
-          path: dist/SilenceCut-windows-x64.zip
+          path: dist/SilenceCut-windows-x64-setup.exe
           archive: false
           if-no-files-found: error
           overwrite: true
@@ -58,7 +61,7 @@ jobs:
           sh scripts/package.sh
       - uses: actions/upload-artifact@v7
         with:
-          path: dist/SilenceCut-macos-arm64.zip
+          path: dist/SilenceCut-macos-arm64.pkg
           archive: false
           if-no-files-found: error
           overwrite: true
@@ -72,7 +75,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: SilenceCut-*.zip
+          pattern: SilenceCut-*
           merge-multiple: true
           path: dist
       - name: Publish both packages
@@ -81,7 +84,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          packages=(dist/SilenceCut-windows-x64.zip dist/SilenceCut-macos-arm64.zip)
+          packages=(dist/SilenceCut-windows-x64-setup.exe dist/SilenceCut-macos-arm64.pkg)
           for package in "${packages[@]}"; do
             test -s "$package"
           done

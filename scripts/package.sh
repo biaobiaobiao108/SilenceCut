@@ -4,6 +4,8 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 work=${SILENCECUT_FFMPEG_WORK:-"$root/.ffmpeg"}
 dest="$root/dist"
+version=$(printf '%s\n' "${SILENCECUT_VERSION:-1.0.0}" | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+)([-+].*)?$/\1/p')
+version=${version:-1.0.0}
 
 export CGO_ENABLED=1
 mkdir -p "$dest"
@@ -15,6 +17,14 @@ copy_notice() {
 
 case "$(uname -s)" in
   MINGW*|MSYS*|UCRT*)
+    compiler=${ISCC:-$(command -v ISCC.exe || true)}
+    if [ -z "$compiler" ]; then
+      compiler="$(cygpath -u "$(printenv 'ProgramFiles(x86)')")/Inno Setup 6/ISCC.exe"
+    fi
+    if [ ! -x "$compiler" ]; then
+      echo "Inno Setup 6 compiler not found. Set ISCC to the path to ISCC.exe." >&2
+      exit 1
+    fi
     sdk="$work/mingw32-x86_64"
     bundle="$dest/SilenceCut-windows-x64"
     mkdir -p "$bundle/Notices/FFmpeg"
@@ -48,8 +58,9 @@ case "$(uname -s)" in
     cp README.md "$bundle/使用说明.md"
     mygo_dir=$(go list -m -f '{{.Dir}}' github.com/egoist/mygo)
     copy_notice "$(cygpath -u "$mygo_dir")/LICENSE" "$bundle/Notices/Mygo.txt"
-    "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -a -cf "$(cygpath -m "$dest/SilenceCut-windows-x64.zip")" \
-      -C "$(cygpath -m "$dest")" "$(basename "$bundle")"
+    MSYS2_ARG_CONV_EXCL='*' "$compiler" "/DAppVersion=$version" \
+      "/DBundleDir=$(cygpath -w "$bundle")" "/DOutputDir=$(cygpath -w "$dest")" \
+      "/DIconFile=$(cygpath -w "$icon_work/SilenceCut.ico")" "$(cygpath -w "$root/scripts/installer.iss")"
     ;;
   Darwin)
     app="$dest/SilenceCut.app"
@@ -74,7 +85,7 @@ case "$(uname -s)" in
     cp "$sdk"/notice/* "$contents/Resources/Notices/FFmpeg/"
     cp README.md "$contents/Resources/使用说明.md"
     copy_notice "$(go list -m -f '{{.Dir}}' github.com/egoist/mygo)/LICENSE" "$contents/Resources/Notices/Mygo.txt"
-    cat > "$contents/Info.plist" <<'PLIST'
+    cat > "$contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -83,8 +94,8 @@ case "$(uname -s)" in
   <key>CFBundleName</key><string>极速过滤</string>
   <key>CFBundleIconFile</key><string>AppIcon.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleVersion</key><string>$version</string>
   <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -95,7 +106,9 @@ PLIST
     done
     codesign --force --sign - "$app"
     codesign --verify --strict --deep "$app"
-    ditto -c -k --keepParent "$app" "$dest/SilenceCut-macos-arm64.zip"
+    package="$dest/SilenceCut-macos-arm64.pkg"
+    productbuild --component "$app" /Applications "$package"
+    pkgutil --payload-files "$package" | grep -E '(^|/)SilenceCut\.app/Contents/MacOS/SilenceCut$'
     ;;
   *) echo "Unsupported build host" >&2; exit 1 ;;
 esac
