@@ -75,7 +75,7 @@ static int is_hdr(enum AVColorTransferCharacteristic transfer) {
     return transfer == AVCOL_TRC_SMPTE2084 || transfer == AVCOL_TRC_ARIB_STD_B67;
 }
 
-static int add_video(CutOutput *out, CutInput *in, int proxy) {
+static int add_video(CutOutput *out, CutInput *in, int max_edge) {
 #ifdef _WIN32
     const char *name = "h264_mf";
 #else
@@ -89,9 +89,9 @@ static int add_video(CutOutput *out, CutInput *in, int proxy) {
     AVStream *stream = in->format->streams[in->video_index];
     if (source->width <= 0 || source->height <= 0) return AVERROR_INVALIDDATA;
     int width = source->width, height = source->height;
-    if (proxy && FFMAX(width, height) > 1280) {
-        width = (int64_t)width * 1280 / FFMAX(source->width, source->height);
-        height = (int64_t)height * 1280 / FFMAX(source->width, source->height);
+    if (max_edge > 0 && FFMAX(width, height) > max_edge) {
+        width = (int64_t)width * max_edge / FFMAX(source->width, source->height);
+        height = (int64_t)height * max_edge / FFMAX(source->width, source->height);
     }
     v->width = FFMAX(2, (width + 1) & ~1);
     v->height = FFMAX(2, (height + 1) & ~1);
@@ -145,7 +145,7 @@ static int add_video(CutOutput *out, CutInput *in, int proxy) {
     return direct ? 0 : av_frame_get_buffer(out->picture, 0);
 }
 
-CutOutput *cut_create(CutInput *in, const char *path, int proxy, int *err, int *video_error) {
+CutOutput *cut_create(CutInput *in, const char *path, int max_edge, int *err, int *video_error) {
     CutOutput *out = av_mallocz(sizeof(*out));
     if (!out) {
         *err = AVERROR(ENOMEM);
@@ -160,7 +160,7 @@ CutOutput *cut_create(CutInput *in, const char *path, int proxy, int *err, int *
     int video = in->decoder[1] != NULL;
     *err = avformat_alloc_output_context2(&out->format, NULL, video ? "mp4" : "wav", path);
     if (*err < 0) goto fail;
-    if (video && (*err = add_video(out, in, proxy)) < 0) {
+    if (video && (*err = add_video(out, in, max_edge)) < 0) {
         *video_error = CUT_VIDEO_ENCODE_ERROR;
         goto fail;
     }

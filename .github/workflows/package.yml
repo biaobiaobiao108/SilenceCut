@@ -31,7 +31,7 @@ jobs:
           path-type: inherit
           install: >-
             curl make patch
-            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm
       - name: Build Windows package
         shell: msys2 {0}
         run: |

@@ -1,0 +1,34 @@
+--- a/configure
++++ b/configure
+@@ -6167 +6167,2 @@
+-        SLIB_CREATE_DEF_CMD='EXTERN_PREFIX="$(EXTERN_PREFIX)" AR="$(AR_CMD)" NM="$(NM_CMD)" $(SRC_PATH)/compat/windows/makedef $(SUBDIR)lib$(NAME).ver $(OBJS) > $$(@:$(SLIBSUF)=.def)'
++        SLIB_CREATE_DEF_CMD='EXTERN_PREFIX="$(EXTERN_PREFIX)" AR="$(AR_CMD)" NM="$(NM_CMD)" $(SRC_PATH)/compat/windows/makedef $(SUBDIR)lib$(NAME).ver @$$@.objs > $$(@:$(SLIBSUF)=.def)'
++        enable response_files
+--- a/ffbuild/library.mak
++++ b/ffbuild/library.mak
+@@ -77,0 +78,3 @@
++ifeq ($(RESPONSE_FILES),yes)
++	$$(file >$$@.objs,$$(filter %.o,$$^))
++endif
+@@ -80 +82,0 @@
+-	$(Q)echo $$(filter %.o,$$^) > $$@.objs
+--- a/compat/windows/makedef
++++ b/compat/windows/makedef
+@@ -35,6 +35,11 @@
+-for object in "$@"; do
+-    if [ ! -f "$object" ]; then
+-        echo "Object does not exist: ${object}" >&2
+-        exit 1
+-    fi
+-done
++case "$1" in
++    @*) test -f "${1#@}" || exit 1 ;;
++    *)
++        for object in "$@"; do
++            if [ ! -f "$object" ]; then
++                echo "Object does not exist: ${object}" >&2
++                exit 1
++            fi
++        done
++        ;;
++esac

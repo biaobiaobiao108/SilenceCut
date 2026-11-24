@@ -79,6 +79,7 @@ func (a *app) setZoom(length int64) {
 	fraction := float64(anchor-a.viewStart) / float64(old)
 	a.viewLength = length
 	a.viewStart = max(0, min(duration-length, anchor-int64(fraction*float64(length))))
+	a.scheduleRecovery()
 }
 
 func clipAt(clips []timeline.Clip, at int64) int {
@@ -86,17 +87,20 @@ func clipAt(clips []timeline.Clip, at int64) int {
 }
 
 func (a *app) stopPlayback() {
+	preparing := a.buildingCut || a.previewPlay
 	if a.player != nil {
 		a.player.Pause()
 	}
 	a.wasPlaying, a.previewPlay = false, false
-	if a.buildingCut {
+	if a.buildingCut && a.previewCancel != nil {
 		a.previewCancel()
-		a.previewCancel, a.buildingCut = nil, false
-		a.previewProgress = 0
+		a.previewCancel = nil
 	}
+	a.cancelChunk()
 	if a.videoCut != nil {
 		a.closePreview()
+		a.openPreview(a.selected, false)
+	} else if preparing && a.player == nil && a.selected != nil && a.selected.file != nil && a.previewCancel == nil {
 		a.openPreview(a.selected, false)
 	}
 }
@@ -173,23 +177,30 @@ func (a *app) timeline(c *ui.Context) {
 					func() { a.setZoom(length * 2 / 3) })
 			})
 		})
-		if item.info.Video {
+		if item.info.Video && !item.offline {
 			ui.Box(c.Key("video-preview")).Grow(1.15).MinHeight(120).Center().
 				Radius(controlRadius).Background(screen).Clip().Children(func() {
-				ready := a.video != nil && a.video.Ready()
-				if a.video != nil {
+				visible := a.video
+				if visible == nil && !a.buildingCut {
+					visible = a.nextVideo
+				}
+				ready := visible != nil && visible.Ready()
+				if visible != nil {
 					// Building Video pumps the native decoder, including while it opens.
-					video := ui.Video(c.Key(a.previewSeq), a.video).Fill().Fit(ui.Contain)
+					video := ui.Video(c.Key(a.previewSeq), visible).Fill().Fit(ui.Contain)
 					target := float32(0)
 					if ready {
 						target = 1
 					}
-					video.Opacity(video.Animate("ready", target, revealDuration))
-					if !ready && a.video.Ready() {
+					if a.videoCut == nil {
+						target = video.Animate("ready", target, revealDuration)
+					}
+					video.Opacity(target)
+					if !ready && visible.Ready() {
 						c.Invalidate()
 					}
 				}
-				if !ready || a.buildingCut {
+				if !ready || a.buildingCut || a.videoCut == nil && a.chunkJob != nil {
 					ui.Column(c.Key("video-feedback")).Absolute().Left(0).Top(0).Right(0).Bottom(0).
 						Background(screen.Alpha(.72)).Center().Children(func() {
 						a.previewFeedback(c, item)
@@ -239,6 +250,7 @@ func (a *app) invertAtPlayhead() {
 		a.selected.history.Edit(timeline.Span{
 			Start: a.position, End: min(clips[i].End, a.position+200_000),
 		}, !clips[i].Keep)
+		a.markProject()
 		a.selection = timeline.Span{}
 	}
 }
@@ -368,9 +380,11 @@ func (a *app) handleWave(c *ui.Context, e ui.Element, item *asset, w, x, y float
 		if drag.end != drag.at {
 			item.history.Edit(timeline.Span{Start: min(drag.at, drag.end), End: max(drag.at, drag.end)},
 				(drag.end > drag.at) == drag.leftKeep)
+			a.markProject()
 			a.seek(drag.end)
 		}
 	}
+	a.scheduleRecovery()
 	*drag = waveGesture{}
 }
 
@@ -544,7 +558,10 @@ func (a *app) overview(c *ui.Context, item *asset, duration int64, allowed bool)
 		Label("全局波形").Tooltip("点击定位 · 拖动窗口浏览")
 	length := a.detailLength(duration)
 	if allowed {
-		pan := func(delta int64) { a.viewStart = max(0, min(duration-length, a.viewStart+delta)) }
+		pan := func(delta int64) {
+			a.viewStart = max(0, min(duration-length, a.viewStart+delta))
+			a.scheduleRecovery()
+		}
 		e.OnShortcut(0, ui.KeyLeft, func() { pan(-length / 4) })
 		e.OnShortcut(0, ui.KeyRight, func() { pan(length / 4) })
 	}
@@ -579,6 +596,7 @@ func (a *app) overview(c *ui.Context, item *asset, duration int64, allowed bool)
 		}
 		if !a.overviewDrag.pendingClick {
 			a.viewStart = max(0, min(duration-length, at-a.overviewDrag.offset))
+			a.scheduleRecovery()
 		}
 	} else {
 		if allowed && a.overviewDrag.pendingClick {

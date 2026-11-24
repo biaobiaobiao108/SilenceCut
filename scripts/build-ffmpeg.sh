@@ -10,6 +10,7 @@ case "$host" in
   MINGW*|MSYS*|UCRT*)
     arch=x86_64
     target=mingw32
+    command -v nasm >/dev/null || { echo "Install NASM and add it to PATH to build the Windows SDK." >&2; exit 1; }
     platform_flags='--enable-mediafoundation --enable-d3d11va --disable-d3d12va --disable-dxva2'
     encoder=h264_mf
     # FFmpeg 8.1 builds the shared D3D11 decoder objects with the non-suffixed switches.
@@ -57,15 +58,17 @@ if [ "$target" = mingw32 ]; then
   # Define COM interface IDs for the standalone filter DLL.
   # Use separate render targets for the scaler. Some drivers reject a
   # multi-plane texture array with these bind flags.
-  patch_file="$root/scripts/ffmpeg-d3d11-scale.patch"
-  if ! patch --dry-run --force -R -p1 < "$patch_file" >/dev/null 2>&1; then
-    patch --force -p1 < "$patch_file"
-  fi
+  # Pass the expanded x86 object list through a response file on Windows.
+  for patch_file in "$root/scripts/ffmpeg-d3d11-scale.patch" "$root/scripts/ffmpeg-mingw-response-files.patch"; do
+    if ! patch --dry-run --force -R -p1 < "$patch_file" >/dev/null 2>&1; then
+      patch --force -p1 < "$patch_file"
+    fi
+  done
 fi
 # Keep the runtime focused on local media, with the platform H.264 encoder and native AAC/PCM.
 ./configure --prefix="$sdk" --arch="$arch" --target-os="$target" \
   --disable-programs --disable-doc --disable-static --enable-shared \
-  --disable-autodetect --disable-network --disable-avdevice --disable-x86asm \
+  --disable-autodetect --disable-network --disable-avdevice \
   --disable-everything --disable-hwaccels --enable-hwaccel="$hwaccels" --enable-protocol=file \
   --enable-demuxer=mov,matroska,avi,mpegps,mpegts,flv,asf,mp3,wav,flac,ogg,aac,aiff,caf,ac3 \
   --enable-decoder='h264,hevc,av1,vp8,vp9,mpeg4,mpeg1video,mpeg2video,mjpeg,prores,dnxhd,ffv1,flv,wmv1,wmv2,wmv3,vc1,theora,rawvideo,png,aac,aac_latm,mp3,flac,opus,vorbis,alac,ac3,eac3,wmav1,wmav2,wmapro,wavpack,adpcm_*,pcm_*' \
@@ -77,4 +80,6 @@ make -j "${SILENCECUT_JOBS:-8}"
 make install
 mkdir -p "$sdk/notice"
 cp "$archive" COPYING.LGPLv2.1 COPYING.LGPLv3 LICENSE.md ffbuild/config.mak "$sdk/notice/"
-if [ "$target" = mingw32 ]; then cp "$patch_file" "$sdk/notice/"; fi
+if [ "$target" = mingw32 ]; then
+  cp "$root/scripts/ffmpeg-d3d11-scale.patch" "$root/scripts/ffmpeg-mingw-response-files.patch" "$sdk/notice/"
+fi

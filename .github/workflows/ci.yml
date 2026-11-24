@@ -26,7 +26,7 @@ jobs:
           path-type: inherit
           install: >-
             curl make patch
-            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm
             mingw-w64-ucrt-x86_64-ffmpeg
       - name: Enable Media Foundation
         shell: powershell

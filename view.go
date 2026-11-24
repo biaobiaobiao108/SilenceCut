@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"strconv"
 	"time"
@@ -71,9 +72,13 @@ func (a *app) view(c *ui.Context) {
 		a.cancelWave()
 	}
 	a.previewTick(c)
+	a.recoveryTick(c)
+	a.warmChunkTick(c)
 	c.OnWindowShortcut(0, ui.KeySpace, a.togglePlay)
 	mod := ui.Cmd
 	c.OnWindowShortcut(mod, ui.KeyO, a.chooseFiles)
+	c.OnWindowShortcut(mod|ui.Shift, ui.KeyO, a.chooseOpenProject)
+	c.OnWindowShortcut(mod, ui.KeyS, func() { a.chooseSaveProject(nil) })
 	c.OnWindowShortcut(mod, ui.KeyZ, func() { a.history(false) })
 	c.OnWindowShortcut(mod|ui.Shift, ui.KeyZ, func() { a.history(true) })
 	root := ui.Column(c.Key("workspace")).Fill().Background(worktop)
@@ -91,6 +96,9 @@ func (a *app) view(c *ui.Context) {
 		}
 	}
 	root.Children(func() {
+		if a.nextVideo != nil && (a.video != nil || a.buildingCut) {
+			ui.Video(c.Key("next-video"), a.nextVideo).Absolute().Size(1, 1).Opacity(0)
+		}
 		a.toolbar(c, narrow)
 		ui.Divider(c)
 		ui.Row(c).Grow(1).MinHeight(0).AlignItems(ui.Stretch).Children(func() {
@@ -112,6 +120,12 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 	ui.Row(c).Gap(8).Height(headerHeight).Shrink(0).Padding(0, workspaceInset).AlignItems(ui.Center).Children(func() {
 		ui.Image(c, appIcon).Size(27, 27)
 		ui.Text(c, title).FontSize(16).Bold()
+		textAction(c.Key("project-open"), "打开项目", !a.busy(), a.chooseOpenProject)
+		textAction(c.Key("project-save"), "保存项目",
+			!a.busy() && (a.projectDirty || a.projectPath != "" || len(a.assets) > 0), func() { a.chooseSaveProject(nil) })
+		if a.projectDirty {
+			ui.Text(c, "未保存").FontSize(11).TextColor(muted)
+		}
 		ui.Spacer(c)
 		if narrow {
 			button := textAction(c.Key("settings-button"), "过滤设置", true, func() { a.settingsOpen = !a.settingsOpen }).
@@ -220,7 +234,9 @@ func (a *app) editor(c *ui.Context) {
 		}
 		ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
 			ui.Text(c, item.name).FontSize(22).Bold().Grow(1).MinWidth(0).SingleLine().Ellipsis("…").Tooltip(item.name)
-			if item.info.Video {
+			if item.offline {
+				textAction(c.Key("relink-source"), "重新定位…", !a.busy(), func() { a.relinkProjectSource(item) })
+			} else if item.info.Video {
 				ui.Textf(c, "%d × %d", item.info.Width, item.info.Height).FontSize(12).TextColor(muted)
 			} else if item.info.Rate > 0 {
 				ui.Textf(c, "%g kHz · %d 声道", float64(item.info.Rate)/1000, item.info.Channels).FontSize(12).TextColor(muted)
@@ -236,18 +252,34 @@ func (a *app) previewFeedback(c *ui.Context, item *asset) {
 			ui.Text(c, a.previewIssue).FontSize(12).TextColor(waveRemovedInk).SingleLine().Ellipsis("…").Tooltip(a.previewIssue)
 			textAction(c.Key("retry-preview"), "重试预览", !a.busy(), func() {
 				a.closePreview()
+				if item.proxy != "" {
+					_ = os.Remove(item.proxy)
+				}
 				item.proxy = ""
 				a.openPreview(item, false)
+				a.primeFilteredVideo()
 			})
 		})
-	} else if a.buildingCut {
+	} else if a.buildingCut || a.videoCut == nil && a.chunkJob != nil {
 		ui.Column(c).Width(sideWidth).Gap(6).Center().Children(func() {
-			ui.Textf(c, "正在准备过滤后试听 · %.0f%%", a.previewProgress*100).
+			label := "正在准备过滤后试听"
+			if a.videoCut != nil {
+				label = "正在准备下一段"
+			} else if a.chunkJob != nil {
+				label = "正在准备首段试听"
+			}
+			ui.Textf(c, "%s · %.0f%%", label, a.previewProgress*100).
 				FontSize(12).TextColor(muted).Role(ui.RoleStatus)
 			ui.Progress(c, a.previewProgress).Width(sideWidth)
 		})
 	} else {
-		ui.Text(c, "正在准备预览…").FontSize(12).TextColor(muted).Role(ui.RoleStatus)
+		label := "正在准备预览…"
+		if !a.originalPreview && len(item.history.Clips) > 0 {
+			if _, ok := nextRetained(item.history.Clips, 0); !ok {
+				label = "无可试听的保留片段"
+			}
+		}
+		ui.Text(c, label).FontSize(12).TextColor(muted).Role(ui.RoleStatus)
 	}
 }
 
@@ -267,8 +299,14 @@ func (a *app) previewTick(c *ui.Context) {
 			a.startPlayback()
 		}
 		if issue != "" {
+			if a.videoCut == nil && a.selected.proxy == "" {
+				a.selected.nativePreviewFailed = true
+			}
 			if a.videoCut != nil {
 				a.filteredVideoFailed(issue)
+			} else if a.needsFilteredVideo() {
+				a.closePreviewPlayer()
+				a.scheduleChunkWarm()
 			} else {
 				item, resume := a.selected, a.previewPlay
 				a.closePreview()
@@ -298,8 +336,11 @@ func (a *app) controls(c *ui.Context, panel ui.Element) {
 		Background(rail).Children(func() {
 		ui.Text(c, "过滤设置").Height(controlHeight).FontSize(14).Bold()
 		preset := max(0, slices.Index(presets, a.opts.preset))
-		tabStrip(c.Key("preset"), "剪辑节奏", &preset, presets, false, !busy, func() { a.opts.preset = presets[preset] })
-		ui.Checkbox(c.Key("ends"), &a.opts.ends, "仅修剪首尾").Disabled(busy)
+		tabStrip(c.Key("preset"), "剪辑节奏", &preset, presets, false, !busy, func() {
+			a.opts.preset = presets[preset]
+			a.markProject()
+		})
+		ui.Checkbox(c.Key("ends"), &a.opts.ends, "仅修剪首尾").Disabled(busy).OnChange(a.markProject)
 		ui.Divider(c)
 		if a.opts.preset == "自定义" {
 			_, issues := a.opts.custom()
@@ -308,7 +349,7 @@ func (a *app) controls(c *ui.Context, panel ui.Element) {
 					var input ui.Element
 					ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
 						ui.Text(c, label).Grow(1).FontSize(12)
-						input = ui.TextInput(c.Key(key), value).Width(60).Label(label).Disabled(busy)
+						input = ui.TextInput(c.Key(key), value).Width(60).Label(label).Disabled(busy).OnChange(a.markProject)
 					})
 					if a.validateSettings && issue != "" {
 						input.ErrorMessage(ui.Text(c, issue).FontSize(11).TextColor(waveRemovedInk)).Invalid(true)
@@ -339,7 +380,7 @@ func (a *app) controls(c *ui.Context, panel ui.Element) {
 				TextColor(actionColor(enabled, true))
 			textAction(c.Key("rerun-all"), "应用到全部", len(a.assets) > 1 && !busy, func() { a.requestFilter(a.assets) })
 		})
-		ui.Checkbox(c.Key("kept-only"), &a.onlyKept, "切片仅导出保留段").Disabled(busy)
+		ui.Checkbox(c.Key("kept-only"), &a.onlyKept, "切片仅导出保留段").Disabled(busy).OnChange(a.markProject)
 	})
 }
 
@@ -386,6 +427,7 @@ func (a *app) sampleThreshold() {
 	amplitude := p.Magnitude()
 	level := max(-70, 20*math.Log10(amplitude))
 	a.opts.preset, a.opts.level = "自定义", strconv.FormatFloat(level, 'f', 1, 64)
+	a.markProject()
 }
 
 func (a *app) editSpan() (timeline.Span, bool) {
@@ -406,6 +448,7 @@ func (a *app) edit(keep bool) {
 	if span, ok := a.editSpan(); ok {
 		a.stopPlayback()
 		a.selected.history.Edit(span, keep)
+		a.markProject()
 	}
 }
 
@@ -414,11 +457,14 @@ func (a *app) history(redo bool) {
 		return
 	}
 	a.stopPlayback()
-	if redo {
+	if redo && a.selected.history.CanRedo() {
 		a.selected.history.Redo()
-	} else {
+	} else if !redo && a.selected.history.CanUndo() {
 		a.selected.history.Undo()
+	} else {
+		return
 	}
+	a.markProject()
 }
 
 func (a *app) footer(c *ui.Context) {

@@ -341,13 +341,14 @@ func TestH264ExportAndScaledPreview(t *testing.T) {
 	spans := []timeline.Span{{Start: 142000, End: 603000}, {Start: 930000, End: 1420000}}
 	for _, test := range []struct {
 		name, dimensions string
-		proxy            bool
+		edge             int
 	}{
-		{"native", "1920x1080", false},
-		{"proxy", "1280x720", true},
+		{"native", "1920x1080", 0},
+		{"proxy_720p", "1280x720", 1280},
+		{"proxy_540p", "960x540", 960},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			path, err := Export(context.Background(), source, dir, test.name, spans, test.proxy, discardProgress)
+			path, err := Preview(context.Background(), source, dir, test.name, spans, test.edge, discardProgress)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -397,7 +398,7 @@ func TestIndexedExportMatchesSequential(t *testing.T) {
 	for _, skipGaps := range []bool{true, false} {
 		last := -1.0
 		started := time.Now()
-		path, err := export(context.Background(), source, dir, "cut", spans, false, false, skipGaps, func(value float64) {
+		path, err := export(context.Background(), source, dir, "cut", spans, 0, false, skipGaps, func(value float64) {
 			if value < last {
 				t.Errorf("progress decreased: %f to %f", last, value)
 			}
@@ -440,6 +441,32 @@ func TestIndexedExportMatchesSequential(t *testing.T) {
 	if err != nil || score < .995 {
 		t.Fatalf("seeking changed decoded video: SSIM %f (%v)", score, err)
 	}
+
+	t.Run("adjacent_preview_chunks", func(t *testing.T) {
+		first := []timeline.Span{{Start: 11_301_000, End: 11_550_000}, {Start: 11_693_000, End: 12_000_000}}
+		second := []timeline.Span{{Start: 12_000_000, End: 12_411_000}}
+		for index, chunk := range [][]timeline.Span{first, second} {
+			path, err := Preview(t.Context(), source, dir, "preview", chunk, 960, discardProgress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := []float64{.556, .411}[index]
+			out := read(ffprobe, "-v", "error", "-show_entries", "stream=duration", "-of", "csv=p=0", path)
+			durations := strings.Fields(string(out))
+			if len(durations) != 2 {
+				t.Fatalf("expected an audio and video stream: %s", out)
+			}
+			for _, raw := range durations {
+				value, err := strconv.ParseFloat(raw, 64)
+				if err != nil || math.Abs(value-expected) > .040 {
+					t.Errorf("chunk %d stream duration %q, expected %.3fs", index, raw, expected)
+				}
+			}
+			if samples := len(pcm(path)) / 2; math.Abs(float64(samples)-48_000*expected) > 1024 {
+				t.Errorf("chunk %d has %d decoded audio samples, expected %.0f", index, samples, 48_000*expected)
+			}
+		}
+	})
 }
 
 func BenchmarkLongVideoPreview(b *testing.B) {
@@ -472,12 +499,41 @@ func BenchmarkLongVideoPreview(b *testing.B) {
 	if len(spans) < 2 || duration >= info.Duration {
 		b.Fatalf("expected multiple retained parts, got %d", len(spans))
 	}
-	for _, mode := range []string{"auto", "software"} {
-		b.Run(mode, func(b *testing.B) {
-			b.Setenv("SILENCECUT_VIDEO_ACCELERATION", mode)
+	// Also time one late source-time window, as when starting at the playhead.
+	windowStart := info.Duration / 24_000_000 * 12_000_000
+	windowEnd := windowStart + 12_000_000
+	var chunk []timeline.Span
+	var chunkDuration int64
+	for _, span := range spans {
+		start, end := max(windowStart, span.Start), min(windowEnd, span.End)
+		if start < end {
+			chunk = append(chunk, timeline.Span{Start: start, End: end})
+			chunkDuration += end - start
+		}
+	}
+	type benchmarkCase struct {
+		name, mode string
+		edge       int
+		spans      []timeline.Span
+		duration   int64
+	}
+	cases := []benchmarkCase{
+		{"auto_720p", "auto", 1280, spans, duration},
+		{"auto_540p", "auto", 960, spans, duration},
+		{"software_720p", "software", 1280, spans, duration},
+		{"software_540p", "software", 960, spans, duration},
+	}
+	if len(chunk) > 0 {
+		cases = append(cases,
+			benchmarkCase{"auto_first_chunk", "auto", 960, chunk, chunkDuration},
+			benchmarkCase{"software_first_chunk", "software", 960, chunk, chunkDuration})
+	}
+	for _, test := range cases {
+		b.Run(test.name, func(b *testing.B) {
+			b.Setenv("SILENCECUT_VIDEO_ACCELERATION", test.mode)
 			dir := b.TempDir()
 			for b.Loop() {
-				path, err := Export(b.Context(), source, dir, "preview", spans, true, discardProgress)
+				path, err := Preview(b.Context(), source, dir, "preview", test.spans, test.edge, discardProgress)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -488,8 +544,8 @@ func BenchmarkLongVideoPreview(b *testing.B) {
 					b.Fatalf("checking proxy duration: %v %s", err, out)
 				}
 				actual, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-				if err != nil || math.Abs(actual-float64(duration)/float64(timeline.Second)) > .1 {
-					b.Fatalf("unexpected proxy duration %s for %d µs of retained media", out, duration)
+				if err != nil || math.Abs(actual-float64(test.duration)/float64(timeline.Second)) > .1 {
+					b.Fatalf("unexpected proxy duration %s for %d µs of retained media", out, test.duration)
 				}
 				if err := os.Remove(path); err != nil {
 					b.Fatal(err)
@@ -497,7 +553,7 @@ func BenchmarkLongVideoPreview(b *testing.B) {
 				b.StartTimer()
 			}
 			b.ReportMetric(float64(info.Duration)/float64(timeline.Second), "source-s")
-			b.ReportMetric(float64(duration)/float64(timeline.Second), "preview-s")
+			b.ReportMetric(float64(test.duration)/float64(timeline.Second), "preview-s")
 		})
 	}
 }

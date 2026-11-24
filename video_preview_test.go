@@ -1,12 +1,69 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"silencecut/internal/media"
 	"silencecut/internal/timeline"
 )
+
+func TestPlayPromotesTheExistingFirstChunk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.mp4")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := &asset{path: path, file: file, info: media.Info{Duration: 3 * timeline.Second, Video: true},
+		history: timeline.History{Clips: []timeline.Clip{
+			{Span: timeline.Span{End: 2 * timeline.Second}, Keep: true},
+			{Span: timeline.Span{Start: 2 * timeline.Second, End: 3 * timeline.Second}},
+		}}}
+	canceled := false
+	job := &previewJob{cancel: func() { canceled = true }, cut: previewChunk(item.history.Clips, 0)}
+	a := &app{selected: item, player: &testPreviewPlayer{}, chunkJob: job, previewProgress: .5}
+	a.togglePlay()
+	if canceled || a.chunkJob != job || !a.buildingCut || a.previewProgress != .5 {
+		t.Fatal("play should promote the in-flight chunk without restarting the encode")
+	}
+	item.file = nil
+	a.togglePlay()
+	if !canceled || a.chunkJob != nil || a.buildingCut {
+		t.Fatal("the same play control should cancel a pending audition")
+	}
+}
+
+func TestPreviewChunksReuseUnaffectedSourceWindows(t *testing.T) {
+	s := timeline.Second
+	h := timeline.History{Clips: []timeline.Clip{
+		{Span: timeline.Span{End: 3 * s}, Keep: true},
+		{Span: timeline.Span{Start: 3 * s, End: 10 * s}},
+		{Span: timeline.Span{Start: 10 * s, End: 14 * s}, Keep: true},
+		{Span: timeline.Span{Start: 14 * s, End: 26 * s}},
+		{Span: timeline.Span{Start: 26 * s, End: 32 * s}, Keep: true},
+	}}
+	first := previewChunk(h.Clips, 0)
+	second := previewChunk(h.Clips, 12*s)
+	third := previewChunk(h.Clips, 26*s)
+	if !slices.Equal(first.spans, []timeline.Span{{End: 3 * s}, {Start: 10 * s, End: 12 * s}}) ||
+		second.sourcePosition(0) != first.sourcePosition(5*s) {
+		t.Fatalf("retained video does not meet at the window boundary: %v %v", first.spans, second.spans)
+	}
+	if at, ok := nextRetained(h.Clips, second.windowEnd); !ok || at != 26*s {
+		t.Fatalf("next chunk did not skip the removed interval: %d, %v", at, ok)
+	}
+	h.Edit(timeline.Span{Start: s, End: 2 * s}, false)
+	if first.matches(previewChunk(h.Clips, 0)) || !second.matches(previewChunk(h.Clips, 12*s)) ||
+		!third.matches(previewChunk(h.Clips, 26*s)) {
+		t.Fatal("editing one interval should invalidate only its source window")
+	}
+}
 
 type testPreviewPlayer struct {
 	at      time.Duration

@@ -177,7 +177,7 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 			if size[0] < wideWorkspace {
 				settings = "过滤设置"
 			}
-			for _, label := range []string{"导出切片", "导出合并媒体", settings, "音频波形和播放位置", "移除", "撤销"} {
+			for _, label := range []string{"打开项目", "保存项目", "导出切片", "导出合并媒体", settings, "音频波形和播放位置", "移除", "撤销"} {
 				r, ok := view.Find(label)
 				if !ok || r.X < 0 || r.Y < 0 || r.W <= 0 || r.H <= 0 ||
 					r.X+r.W > float32(size[0]) || r.Y+r.H > float32(size[1]) {
@@ -354,10 +354,15 @@ func TestPlayheadAndBoundaryGestures(t *testing.T) {
 	}
 
 	item.info.Video = true
-	a.videoCut = &filteredVideo{spans: timeline.Kept(item.history.Clips)}
+	item.path = filepath.Join(t.TempDir(), "source.mp4")
+	if err := os.WriteFile(item.path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	item.file, _ = os.Stat(item.path)
+	a.videoCut = previewChunk(item.history.Clips, 15*second)
 	view.Frame()
 	if err := view.Click("播放"); err != nil || !p.Playing() || a.position != 15*second ||
-		p.seeks[len(p.seeks)-1] != 10*second {
+		p.seeks[len(p.seeks)-1] != 0 {
 		t.Fatalf("filtered playback did not map the cut: %v, cursor %d, seeks %v", err, a.position, p.seeks)
 	}
 	a.videoCut = nil
