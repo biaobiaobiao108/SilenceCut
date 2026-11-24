@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,15 @@ import (
 	"silencecut/internal/media"
 	"silencecut/internal/timeline"
 )
+
+func TestCloseWaitsForActiveJobBeforePrompting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	state := &app{projectDirty: true, cancel: cancel}
+	if state.requestClose() || !state.closePending || ctx.Err() != context.Canceled {
+		t.Fatal("closing a dirty project must wait for the canceled job")
+	}
+}
 
 func TestProjectRoundTrip(t *testing.T) {
 	dir := t.TempDir()

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -183,6 +184,151 @@ func TestDetectFrameBoundaries(t *testing.T) {
 			}
 			if kept := timeline.Kept(clips); !reflect.DeepEqual(kept, tc.kept) {
 				t.Fatalf("retained %v, want %v", kept, tc.kept)
+			}
+		})
+	}
+}
+
+func TestPausePresetsRemoveBreathsAndProtectSpeech(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to create the PCM fixture")
+	}
+	const rate = 16000
+	random := rand.New(rand.NewPCG(17, 39))
+	var samples bytes.Buffer
+	for i := range rate * 4 {
+		ms := i * 1000 / rate
+		phase := float64(i) * 2 * math.Pi * 175 / rate
+		voice := math.Sin(phase) + .25*math.Sin(2*phase)
+		noise := 2*random.Float64() - 1
+		var sample float64
+		switch {
+		case ms >= 200 && ms < 700, ms >= 2175 && ms < 2600, ms >= 2700 && ms < 3100:
+			sample = .16 * voice
+		case ms >= 700 && ms < 800, ms >= 2600 && ms < 2700:
+			sample = .035 * noise
+		case ms >= 950 && ms < 1275, ms >= 3300 && ms < 3650:
+			sample = .045 * noise
+		case ms >= 1550 && ms < 2000:
+			sample = .008 * voice
+		}
+		samples.Write(binary.LittleEndian.AppendUint16(nil, uint16(int16(sample*32767))))
+	}
+	source := filepath.Join(t.TempDir(), "voicing.wav")
+	cmd := exec.Command(ffmpeg, "-v", "error", "-f", "s16le", "-ar", "16000", "-ac", "1", "-i", "-", source)
+	cmd.Stdin = &samples
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v: %s", err, out)
+	}
+	for _, preset := range []struct {
+		pause, before, after int64
+		margin               float64
+		cutsShortPause       bool
+	}{
+		{280_000, 100_000, 120_000, 10, false},
+		{200_000, 65_000, 80_000, 7, false},
+		{140_000, 35_000, 50_000, 4, true},
+	} {
+		settings := timeline.Settings{Threshold: -36, MinPause: preset.pause, BreathMargin: preset.margin,
+			Before: preset.before, After: preset.after}
+		clips, err := Detect(context.Background(), source, settings, discardProgress)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keeps := func(clips []timeline.Clip, at int64) bool {
+			t.Helper()
+			for _, clip := range clips {
+				if clip.Start <= at && at < clip.End {
+					return clip.Keep
+				}
+			}
+			t.Fatalf("no clip for %d", at)
+			return false
+		}
+		if keeps(clips, 1_100_000) || keeps(clips, 3_450_000) ||
+			!keeps(clips, 720_000) || !keeps(clips, 1_750_000) || !keeps(clips, 2_650_000) ||
+			keeps(clips, 2_090_000) == preset.cutsShortPause {
+			t.Fatalf("unexpected speech/breath cuts at %d µs minimum: %v", preset.pause, clips)
+		}
+		settings.OnlyEnds = true
+		ends, err := Detect(context.Background(), source, settings, discardProgress)
+		if err != nil || !keeps(ends, 1_100_000) {
+			t.Fatalf("ends-only mode removed an internal pause: %v, %v", ends, err)
+		}
+	}
+}
+
+func TestExportKeepsContinuousMatroskaAudio(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate Matroska fixtures")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "constant.mkv")
+	if out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "aevalsrc=0.25:s=48000:d=2",
+		"-c:a", "pcm_s16le", source).CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v: %s", err, out)
+	}
+	result, err := Export(context.Background(), source, dir, "result", []timeline.Span{{End: 2 * timeline.Second}}, discardProgress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{source, result} {
+		pcm, err := exec.Command(ffmpeg, "-v", "error", "-i", path, "-f", "s16le", "-").Output()
+		if err != nil || len(pcm) != 192_000 {
+			t.Fatalf("%s: %d PCM bytes, %v", path, len(pcm), err)
+		}
+		for i := 0; i < len(pcm); i += 2 {
+			if sample := binary.LittleEndian.Uint16(pcm[i:]); sample != 8192 {
+				t.Fatalf("%s: sample %d = %d, want 8192", path, i/2, sample)
+			}
+		}
+	}
+}
+
+func TestSDRExportPreservesColor(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate video fixtures")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe CLI is used to verify video color metadata")
+	}
+	for _, colorRange := range []string{"tv", "pc"} {
+		t.Run(colorRange, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, "bt709.mp4")
+			if out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=160x120:r=24:d=1",
+				"-f", "lavfi", "-i", "sine=d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+				"-colorspace", "bt709", "-color_trc", "bt709", "-color_primaries", "bt709", "-color_range", colorRange,
+				"-c:a", "aac", source).CombinedOutput(); err != nil {
+				t.Fatalf("fixture: %v: %s", err, out)
+			}
+			result, err := export(context.Background(), source, dir, "result", []timeline.Span{{End: timeline.Second}}, true, true, discardProgress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rgb := func(path string) []byte {
+				t.Helper()
+				fields, err := exec.Command(ffprobe, "-v", "error", "-select_streams", "v:0",
+					"-show_entries", "stream=color_space,color_range", "-of", "default=nw=1", path).Output()
+				if err != nil || !bytes.Contains(fields, []byte("color_space=bt709")) || !bytes.Contains(fields, []byte("color_range="+colorRange)) {
+					t.Fatalf("%s: unexpected color metadata: %s, %v", path, fields, err)
+				}
+				pixels, err := exec.Command(ffmpeg, "-v", "error", "-i", path, "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-").Output()
+				if err != nil || len(pixels) != 160*120*3 {
+					t.Fatalf("%s: %d RGB bytes, %v", path, len(pixels), err)
+				}
+				center := (160*60 + 80) * 3
+				return pixels[center : center+3]
+			}
+			before, after := rgb(source), rgb(result)
+			for i := range before {
+				if math.Abs(float64(before[i])-float64(after[i])) > 8 {
+					t.Fatalf("source RGB %v, export RGB %v", before, after)
+				}
 			}
 		})
 	}

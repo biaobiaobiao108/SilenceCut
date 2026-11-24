@@ -39,9 +39,11 @@ func (f filterOptions) settings(automatic float64) (timeline.Settings, error) {
 	s := timeline.Settings{Threshold: automatic, OnlyEnds: f.ends}
 	switch f.preset {
 	case "慢":
-		s.Before, s.After = 250_000, 250_000
+		s.MinPause, s.Before, s.After, s.BreathMargin = 280_000, 100_000, 120_000, 10
 	case "中等":
-		s.Before, s.After = 150_000, 150_000
+		s.MinPause, s.Before, s.After, s.BreathMargin = 200_000, 65_000, 80_000, 7
+	case "快":
+		s.MinPause, s.Before, s.After, s.BreathMargin = 140_000, 35_000, 50_000, 4
 	case "自定义":
 		values, issues := f.custom()
 		for _, issue := range issues {
@@ -88,6 +90,7 @@ type asset struct {
 	exportIssue string
 	source      sourceStamp
 	offline     bool
+	pendingLoad bool
 }
 
 type player interface {
@@ -132,13 +135,14 @@ type app struct {
 	overviewColumns                []timeline.Peak
 	projectPath                    string
 	projectDirty, closeApproved    bool
+	closePending                   bool
 	recovery                       *recoveryFile
 	recoveryAt                     time.Time
 }
 
 func main() {
 	state := &app{
-		opts: filterOptions{preset: "慢", level: "-40", before: "0.10", after: "0.10"},
+		opts: filterOptions{preset: "中等", level: "-40", before: "0.10", after: "0.10"},
 	}
 	recovery, previous, recoveryErr := openRecovery()
 	state.recovery = recovery
@@ -167,14 +171,8 @@ func main() {
 			}
 		}
 		state.win.OnClose(func(e *mygo.CloseEvent) {
-			if state.picking {
+			if !state.requestClose() {
 				e.PreventDefault()
-			} else if state.projectDirty && !state.closeApproved && state.cancel == nil {
-				e.PreventDefault()
-				state.guardProject(func() {
-					state.closeApproved = true
-					state.win.Close()
-				})
 			}
 		})
 		state.win.OnClosed(func() {
@@ -202,6 +200,26 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (a *app) requestClose() bool {
+	if a.picking {
+		return false
+	}
+	if !a.projectDirty || a.closeApproved {
+		return true
+	}
+	if a.cancel != nil {
+		a.closePending = true
+		a.cancelJob()
+		return false
+	}
+	a.refilter = nil
+	a.guardProject(func() {
+		a.closeApproved = true
+		a.win.Close()
+	})
+	return false
 }
 
 func (a *app) async(fn func()) {
@@ -336,6 +354,10 @@ func (a *app) end(status string) {
 	a.cancel()
 	a.cancel, a.job, a.status = nil, "", status
 	a.canceling = false
+	if a.closePending {
+		a.closePending = false
+		a.win.Close()
+	}
 }
 
 func (a *app) report() media.Progress {
@@ -353,7 +375,9 @@ func (a *app) validSettings() bool {
 	_, err := a.opts.settings(0)
 	a.validateSettings = err != nil
 	if a.validateSettings {
+		a.focusMode = false
 		a.settingsOpen = true
+		a.status = "请修正过滤设置 · " + err.Error()
 	}
 	return !a.validateSettings
 }
@@ -436,6 +460,7 @@ func (a *app) filter(items []*asset) {
 				item.file, item.settings, item.history = current.file, current.settings, current.history
 				item.filtered, item.analyzing, item.issue, item.exportIssue = clips, false, "", ""
 				item.offline = false
+				item.pendingLoad = false
 				a.markProject()
 				if item == a.selected {
 					a.selection = timeline.Span{}

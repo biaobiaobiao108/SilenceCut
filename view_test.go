@@ -603,6 +603,37 @@ func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
 	}
 }
 
+func TestFocusModeShowsInvalidImportSettings(t *testing.T) {
+	a := &app{focusMode: true, opts: filterOptions{preset: "自定义", before: "0.10", after: "0.10"}}
+	view := ui.NewTester(a.view, 1180, 790)
+	a.add([]string{"sample.wav"})
+	view.Frame()
+	if a.focusMode || len(a.assets) != 0 || !view.HasText("请输入 −70 到 20 dB") ||
+		!view.HasText("请修正过滤设置 · 请输入 −70 到 20 dB") {
+		t.Fatal("invalid settings must be visible after a rejected import")
+	}
+}
+
+func TestProjectSourceRowsAndResume(t *testing.T) {
+	first := &asset{path: "same.wav", name: "same.wav"}
+	second := &asset{path: first.path, name: first.name, offline: true, pendingLoad: true}
+	a := &app{assets: []*asset{first, second}, selected: first, opts: filterOptions{preset: "中等"}}
+	view := ui.NewTester(a.view, 1180, 790)
+	if !view.HasText("继续读取素材") {
+		t.Fatal("resume must be visible with a loaded source selected")
+	}
+	a.selectAsset(second)
+	view.Frame()
+	if view.HasText("重新定位…") {
+		t.Fatal("a pending source should keep its original path when resumed")
+	}
+	second.pendingLoad = false
+	view.Frame()
+	if view.HasText("继续读取素材") || !view.HasText("重新定位…") {
+		t.Fatal("a checked, offline source should offer relinking")
+	}
+}
+
 func TestBatchStatusAndPublishedFolder(t *testing.T) {
 	item := &asset{name: "失败.wav", info: media.Info{Duration: 5 * timeline.Second},
 		history: timeline.History{Clips: []timeline.Clip{{Span: timeline.Span{End: 5 * timeline.Second}, Keep: true}}}}

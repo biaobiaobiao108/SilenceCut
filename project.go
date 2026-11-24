@@ -426,7 +426,7 @@ func (a *app) loadProject(doc projectDocument, path string, recovered bool) {
 		item := &asset{
 			path: source, name: filepath.Base(source), source: saved.Source, info: saved.Info,
 			automatic: saved.Automatic, settings: saved.Settings, filtered: saved.Filtered,
-			history: timeline.History{Clips: saved.Clips}, offline: true, issue: "待检查素材",
+			history: timeline.History{Clips: saved.Clips}, offline: true, pendingLoad: true, issue: "待读取素材",
 		}
 		a.assets = append(a.assets, item)
 	}
@@ -444,9 +444,24 @@ func (a *app) loadProject(doc projectDocument, path string, recovered bool) {
 		}
 	}
 	if len(a.assets) > 0 {
-		a.loadProjectSources(a.assets, "")
+		a.resumeProjectSources()
 	} else {
 		a.status = "已打开项目"
+	}
+}
+
+func (a *app) resumeProjectSources() {
+	if a.busy() {
+		return
+	}
+	var pending []*asset
+	for _, item := range a.assets {
+		if item.pendingLoad {
+			pending = append(pending, item)
+		}
+	}
+	if len(pending) > 0 {
+		a.loadProjectSources(pending, "")
 	}
 }
 
@@ -488,6 +503,7 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 			}
 			wave := timeline.BuildWaveform(peaks)
 			a.win.Update(func() {
+				item.pendingLoad = false
 				if err != nil {
 					item.issue, item.offline = err.Error(), true
 					return
@@ -506,7 +522,7 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 			})
 		}
 		a.win.Update(func() {
-			if a.selected != nil && a.selected.file != nil && !a.selected.offline && a.selected.info.Duration > 0 {
+			if a.player == nil && a.selected != nil && a.selected.file != nil && !a.selected.offline && a.selected.info.Duration > 0 {
 				a.openPreview(a.selected)
 			}
 			status := "已读取项目素材"

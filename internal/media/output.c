@@ -102,6 +102,11 @@ static int add_video(CutOutput *out, CutInput *in) {
         v->color_trc = AVCOL_TRC_BT709;
         v->colorspace = AVCOL_SPC_BT709;
         v->color_range = AVCOL_RANGE_MPEG;
+    } else {
+        v->color_primaries = source->color_primaries;
+        v->color_trc = source->color_trc;
+        v->colorspace = source->colorspace == AVCOL_SPC_RGB ? AVCOL_SPC_BT709 : source->colorspace;
+        v->color_range = source->color_range;
     }
     int direct = !hdr && in->mode == CUT_DIRECT && in->hardware_format != AV_PIX_FMT_NONE;
     v->pix_fmt = direct ? in->hardware_format : AV_PIX_FMT_NV12;
@@ -163,7 +168,15 @@ CutOutput *cut_create(CutInput *in, const char *path, int *err, int *video_error
     if ((*err = add_audio(out, in, video)) < 0) goto fail;
     if (!video) av_opt_set(out->format->priv_data, "rf64", "auto", 0);
     if ((*err = avio_open(&out->format->pb, path, AVIO_FLAG_WRITE)) < 0) goto fail;
-    if ((*err = avformat_write_header(out->format, NULL)) < 0) goto fail;
+    AVDictionary *opts = NULL;
+    if (video && (out->video->color_primaries != AVCOL_PRI_UNSPECIFIED ||
+                  out->video->color_trc != AVCOL_TRC_UNSPECIFIED ||
+                  out->video->colorspace != AVCOL_SPC_UNSPECIFIED ||
+                  out->video->color_range != AVCOL_RANGE_UNSPECIFIED))
+        av_dict_set(&opts, "movflags", "+write_colr", 0);
+    *err = avformat_write_header(out->format, &opts);
+    av_dict_free(&opts);
+    if (*err < 0) goto fail;
     return out;
 
 fail:
@@ -326,7 +339,7 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
             if (!out->download) return AVERROR(ENOMEM);
             av_frame_unref(out->download);
             if ((err = av_hwframe_transfer_data(out->download, source, 0)) < 0) return err;
-            if (hdr && (err = av_frame_copy_props(out->download, source)) < 0) return err;
+            if ((err = av_frame_copy_props(out->download, source)) < 0) return err;
             source = out->download;
         }
         if ((err = av_frame_make_writable(dest)) < 0) return err;
@@ -351,6 +364,15 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
             out->scale = sws_getCachedContext(out->scale, source->width, source->height, source->format,
                                              dest->width, dest->height, dest->format, SWS_BILINEAR, NULL, NULL, NULL);
             if (!out->scale) return AVERROR(EINVAL);
+            const int *input_matrix = sws_getCoefficients(source->colorspace == AVCOL_SPC_UNSPECIFIED ?
+                                                        v->colorspace : source->colorspace);
+            const int *output_matrix = sws_getCoefficients(v->colorspace);
+            int full = source->color_range == AVCOL_RANGE_JPEG ||
+                (source->color_range == AVCOL_RANGE_UNSPECIFIED && v->color_range == AVCOL_RANGE_JPEG);
+            int output_full = v->color_range == AVCOL_RANGE_JPEG;
+            err = sws_setColorspaceDetails(out->scale, input_matrix, full, output_matrix, output_full,
+                                           0, 1 << 16, 1 << 16);
+            if (err < 0) return err;
             err = sws_scale(out->scale, (const uint8_t * const *)source->data, source->linesize,
                             0, source->height, dest->data, dest->linesize);
         }

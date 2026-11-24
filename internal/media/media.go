@@ -121,6 +121,9 @@ func Detect(ctx context.Context, path string, settings timeline.Settings, progre
 		return nil, err
 	}
 	defer C.cut_close(in)
+	if settings.MinPause > 0 {
+		return detectPauses(ctx, in, info, settings, progress)
+	}
 	var gaps []timeline.Span
 	var cursor, quiet int64
 	var hasAudio bool
@@ -365,6 +368,7 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, skipGap
 	var hasPicture bool
 	var jumps, decodedVideo int
 	var checkAudio, checkVideo bool
+	var audioEnd int64
 	lastChecked := -1
 	trySkip := func(after int64) error {
 		if !skipGaps || !info.Video || audio.index != video || video >= len(videoRanges) ||
@@ -383,6 +387,7 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, skipGap
 		}
 		if code > 0 {
 			jumps++
+			audioEnd = -1
 			checkAudio, checkVideo, hasPicture = true, true, false
 		}
 		return nil
@@ -413,13 +418,21 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, skipGap
 		pts := int64(frame.pts)
 		scannedThrough = max(scannedThrough, pts)
 		if kind == 1 {
-			if checkAudio && frame.samples > 0 {
-				if sampleIndex(pts, info.Rate) > audioRanges[lastChecked].start {
+			if frame.samples == 0 {
+				return false, nil
+			}
+			start := sampleIndex(pts, info.Rate)
+			if audioEnd >= 0 {
+				start = audioFrameStart(start, audioEnd, info.Rate)
+			}
+			if checkAudio {
+				if start > audioRanges[lastChecked].start {
 					return false, errGapSeek
 				}
 				checkAudio = false
 			}
-			if err := audio.write(sampleIndex(pts, info.Rate), frame); err != nil {
+			audioEnd = max(audioEnd, start+int64(frame.samples))
+			if err := audio.write(start, frame); err != nil {
 				return false, err
 			}
 		} else {

@@ -263,7 +263,7 @@ func (a *app) library(c *ui.Context, dragging bool) {
 		ui.Scroll(c.Key("assets")).Grow(1).MinHeight(0).Children(func() {
 			ui.Column(c).Gap(2).Children(func() {
 				for _, item := range a.assets {
-					a.assetRow(c.Key(item.path), item)
+					a.assetRow(c.Key(item), item)
 				}
 			})
 		})
@@ -328,7 +328,7 @@ func (a *app) editor(c *ui.Context, dragging bool) {
 			}
 			ui.Icon(c, glyph).Size(17, 17).TextColor(subtle).Shrink(0)
 			ui.Text(c, item.name).FontSize(18).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…").Tooltip(item.name)
-			if item.offline {
+			if item.offline && !item.pendingLoad {
 				textAction(c.Key("relink-source"), "重新定位…", !a.busy(), func() { a.relinkProjectSource(item) })
 			} else if item.info.Video {
 				ui.Textf(c, "%d × %d", item.info.Width, item.info.Height).FontSize(12).TextColor(subtle).FontFeatures("tnum")
@@ -437,12 +437,8 @@ func (a *app) controls(c *ui.Context, panel ui.Element, width, top float32) {
 			field("片段后留白 (秒)", "padding-after", &a.opts.after, issues[2])
 		} else {
 			settings, _ := a.opts.settings(0)
-			threshold := "—"
-			if item != nil && len(item.peaks) > 0 {
-				threshold = fmt.Sprintf("%.1f dB", item.automatic)
-			}
-			settingValue(c, "自动阈值", threshold)
-			settingValue(c, "前后各留", fmt.Sprintf("%.2f 秒", float64(settings.Before)/1e6))
+			settingValue(c, "最短停顿", fmt.Sprintf("%d 毫秒", settings.MinPause/1000))
+			settingValue(c, "前 / 后留白", fmt.Sprintf("%d / %d 毫秒", settings.Before/1000, settings.After/1000))
 		}
 		ui.Divider(c)
 		if item != nil && len(item.history.Clips) > 0 && !busy {
@@ -544,7 +540,8 @@ func (a *app) history(redo bool) {
 }
 
 func (a *app) activity(c *ui.Context) {
-	if a.cancel == nil && a.status == "" && a.publishedDir == "" {
+	pending := slices.ContainsFunc(a.assets, func(item *asset) bool { return item.pendingLoad })
+	if a.cancel == nil && a.status == "" && a.publishedDir == "" && !pending {
 		return
 	}
 	ui.Row(c.Key("activity")).AlignItems(ui.Center).Gap(8).Shrink(0).Height(controlHeight).Children(func() {
@@ -564,6 +561,9 @@ func (a *app) activity(c *ui.Context) {
 				SingleLine().Ellipsis("…").Tooltip(a.status).Role(ui.RoleStatus)
 		} else {
 			ui.Spacer(c).Grow(1)
+		}
+		if pending {
+			textAction(c.Key("resume-sources"), "继续读取素材", !a.busy(), a.resumeProjectSources)
 		}
 		if a.publishedDir != "" {
 			textAction(c.Key("output-folder"), "打开导出文件夹", true, func() {

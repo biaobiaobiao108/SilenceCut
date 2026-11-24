@@ -20,6 +20,8 @@ type Settings struct {
 	Threshold     float64
 	Before, After int64
 	OnlyEnds      bool
+	MinPause      int64
+	BreathMargin  float64
 }
 
 func Filter(duration int64, silence []Span, settings Settings) []Clip {
