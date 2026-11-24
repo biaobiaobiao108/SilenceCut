@@ -60,7 +60,7 @@ sh scripts/package.sh
 go test -run '^$' -bench '^BenchmarkLongVideoExport$' -benchtime=1x ./internal/media
 ```
 
-打包工作流在独立 Windows 和 macOS runner 上安装并启动应用。Windows 另外验证卸载。推送到 `verify/**` 分支可运行这一流程。新建标签后，同一提交的双平台测试、静态检查和安装验证均通过才会发布安装包。
+打包工作流在独立 Windows 和 macOS runner 上安装并启动应用。Windows 另外验证卸载。推送到 `verify/**` 分支可运行这一流程。新建标签后会打包并验证双平台安装包，通过后直接发布。
 
 ## 许可证
 
