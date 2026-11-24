@@ -493,6 +493,47 @@ func TestPlayheadAndBoundaryGestures(t *testing.T) {
 	}
 }
 
+func TestPlayheadDragPansTimelineAtEdges(t *testing.T) {
+	const second = timeline.Second
+	duration := int64(120) * second
+	item := &asset{info: media.Info{Duration: duration}}
+	a := &app{selected: item, position: 35 * second, viewStart: 20 * second, viewLength: 30 * second}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	body := wave.Y + wave.H/2
+	screenX := func(at int64) float32 {
+		return wave.X + wave.W*float32(float64(at-a.viewStart)/float64(a.detailLength(duration)))
+	}
+
+	view.Press(screenX(35*second), body)
+	view.Move(wave.X+wave.W+16, body)
+	view.Advance(400 * time.Millisecond)
+	if a.viewStart <= 20*second {
+		t.Fatalf("right-edge drag did not advance the timeline: %d µs", a.viewStart)
+	}
+	if a.position < a.viewStart+a.detailLength(duration)-second {
+		t.Fatalf("playhead did not stay at the advancing right edge: view %d, position %d", a.viewStart, a.position)
+	}
+	view.Release(wave.X+wave.W+16, body)
+
+	a.viewStart, a.position = 60*second, 75*second
+	view.Frame()
+	view.Press(screenX(75*second), body)
+	view.Move(wave.X-16, body)
+	view.Advance(400 * time.Millisecond)
+	if a.viewStart >= 60*second {
+		t.Fatalf("left-edge drag did not rewind the timeline: %d µs", a.viewStart)
+	}
+	if a.position > a.viewStart+second {
+		t.Fatalf("playhead did not stay at the advancing left edge: view %d, position %d", a.viewStart, a.position)
+	}
+	view.Key(0, ui.KeyEscape)
+	view.Release(wave.X-16, body)
+	if a.viewStart != 60*second || a.position != 75*second {
+		t.Fatalf("Escape did not restore the drag start: view %d, position %d", a.viewStart, a.position)
+	}
+}
+
 func TestKeyboardBoundaryNudging(t *testing.T) {
 	const second = timeline.Second
 	item := &asset{info: media.Info{Duration: 30 * second}, history: timeline.History{Clips: []timeline.Clip{

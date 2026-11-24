@@ -19,6 +19,9 @@ const (
 	hitRadius     = 6
 	boundaryNudge = 100_000
 	seekInterval  = 33 * time.Millisecond
+	waveEdgeZone  = 24
+	wavePanTick   = 16 * time.Millisecond
+	wavePanRate   = .3
 )
 
 var (
@@ -42,10 +45,11 @@ type waveGesture struct {
 	kind                waveDragKind
 	leftKeep, selecting bool
 	at, end, min, max   int64
+	offset, viewStart   int64
 	position            int64
 	selection           timeline.Span
 	x                   float32
-	lastSeek            time.Time
+	lastSeek, lastPan   time.Time
 }
 
 type overviewGesture struct {
@@ -101,6 +105,46 @@ func (a *app) panWave(dx float32, duration, length int64, width float32) bool {
 	a.viewStart = next
 	a.scheduleRecovery()
 	return true
+}
+
+func (a *app) dragPlayhead(c *ui.Context, drag *waveGesture, x, width float32, duration, length int64) {
+	now := c.Now()
+	elapsed := now.Sub(drag.lastPan)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	elapsed = min(elapsed, 50*time.Millisecond)
+	drag.lastPan = now
+
+	direction, depth := 0, float32(0)
+	switch {
+	case x < waveEdgeZone:
+		direction, depth = -1, waveEdgeZone-x
+	case x > width-waveEdgeZone:
+		direction, depth = 1, x-(width-waveEdgeZone)
+	}
+	if direction != 0 && length < duration {
+		if elapsed > 0 {
+			factor := 1 + min(1, max(0, depth)/waveEdgeZone)
+			delta := max(1, int64(math.Round(float64(length)*wavePanRate*float64(factor)*elapsed.Seconds())))
+			a.viewStart = max(0, min(duration-length, a.viewStart+int64(direction)*delta))
+		}
+		if direction < 0 && a.viewStart > 0 || direction > 0 && a.viewStart < duration-length {
+			c.After(wavePanTick)
+		}
+	}
+
+	target := a.viewStart + int64(math.Round(float64(max(0, min(x, width)))/float64(width)*float64(length))) + drag.offset
+	if x < 0 {
+		target = a.viewStart
+	} else if x > width {
+		target = a.viewStart + length
+	}
+	a.position = max(0, min(duration, target))
+	if a.position != drag.end && (drag.lastSeek.IsZero() || now.Sub(drag.lastSeek) >= seekInterval) {
+		a.seek(a.position)
+		drag.lastSeek, drag.end = now, a.position
+	}
 }
 
 func clipAt(clips []timeline.Clip, at int64) int {
@@ -265,7 +309,7 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Radius(surfaceRadius).Background(waveBack).
 		BorderColor(border).BorderWidth(1).Clip().
 		Focusable().FocusRing(true).Label("音频波形和播放位置").
-		Description("横向滚动波形平移视图；用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点")
+		Description("横向滚动波形平移视图；拖动游标到左右边缘继续浏览；用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点")
 	clips := item.history.Clips
 	if i := clipAt(clips, a.position); i < len(clips) {
 		kind := "移除片段"
@@ -339,7 +383,10 @@ func (a *app) handleWave(c *ui.Context, e ui.Element, item *asset, w, x, y float
 	}
 	if drag.kind == waveIdle && pressed {
 		a.stopPlayback()
-		*drag = waveGesture{kind: kind, x: x, at: at, end: at, position: a.position, selection: a.selection}
+		*drag = waveGesture{
+			kind: kind, x: x, at: at, end: at, position: a.position, selection: a.selection,
+			viewStart: a.viewStart, lastPan: c.Now(),
+		}
 		switch kind {
 		case waveBoundary:
 			left, right := item.history.Clips[boundary], item.history.Clips[boundary+1]
@@ -349,6 +396,7 @@ func (a *app) handleWave(c *ui.Context, e ui.Element, item *asset, w, x, y float
 			a.seek(at)
 		case wavePlayhead:
 			drag.end = a.position
+			drag.offset = a.position - at
 		}
 	}
 	if drag.kind != waveIdle {
@@ -369,19 +417,7 @@ func (a *app) handleWave(c *ui.Context, e ui.Element, item *asset, w, x, y float
 	if pressed {
 		switch kind {
 		case wavePlayhead:
-			target := drag.position + int64(math.Round((float64(x)-float64(drag.x))/float64(w)*float64(length)))
-			switch {
-			case x < 0:
-				target = span.Start
-			case x > w:
-				target = span.End
-			}
-			a.position = max(span.Start, min(span.End, target))
-			now := c.Now()
-			if a.position != drag.end && (drag.lastSeek.IsZero() || now.Sub(drag.lastSeek) >= seekInterval) {
-				a.seek(a.position)
-				drag.lastSeek, drag.end = now, a.position
-			}
+			a.dragPlayhead(c, drag, x, w, item.info.Duration, length)
 		case waveBoundary:
 			if x != drag.x || drag.end != drag.at {
 				delta := int64(math.Round((float64(x) - float64(drag.x)) / float64(w) * float64(length)))
@@ -413,6 +449,7 @@ func (a *app) handleWave(c *ui.Context, e ui.Element, item *asset, w, x, y float
 func (a *app) cancelWave() {
 	drag := &a.waveDrag
 	a.selection = drag.selection
+	a.viewStart = drag.viewStart
 	a.seek(drag.position)
 	drag.kind = waveCanceled
 }
