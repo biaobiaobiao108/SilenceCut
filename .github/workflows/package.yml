@@ -16,7 +16,7 @@ jobs:
   windows:
     name: Windows amd64
     if: github.event_name == 'workflow_dispatch' || !github.event.deleted
-    runs-on: windows-2025
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -48,7 +48,7 @@ jobs:
   macos:
     name: macOS arm64
     if: github.event_name == 'workflow_dispatch' || !github.event.deleted
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
         with:
