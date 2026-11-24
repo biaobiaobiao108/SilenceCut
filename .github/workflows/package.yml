@@ -71,7 +71,7 @@ jobs:
   verify-windows:
     name: Verify Windows installer
     needs: windows
-    runs-on: windows-2025
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -85,7 +85,7 @@ jobs:
   verify-macos:
     name: Verify macOS installer
     needs: macos
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/download-artifact@v8
         with:
