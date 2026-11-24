@@ -340,9 +340,11 @@ func TestIndexedExportMatchesSequential(t *testing.T) {
 	}
 	dir := t.TempDir()
 	source := filepath.Join(dir, "indexed.mp4")
+	// AAC perceptual noise substitution depends on the decoder's previous packets.
+	// Disable it in the source fixture so indexed and sequential PCM can match exactly.
 	out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=19:size=640x360:rate=24",
 		"-f", "lavfi", "-i", "aevalsrc=0.3*sin(2*PI*(300*t+11*t*t)):s=48000:d=19",
-		"-c:v", "libx264", "-preset", "fast", "-g", "24", "-bf", "2", "-c:a", "aac", source).CombinedOutput()
+		"-c:v", "libx264", "-preset", "fast", "-g", "24", "-bf", "2", "-c:a", "aac", "-aac_pns", "0", source).CombinedOutput()
 	if strings.Contains(string(out), "Unknown encoder") {
 		t.Skip("fixture generator needs libx264")
 	}
