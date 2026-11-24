@@ -133,6 +133,10 @@ func (a *app) workspace(c *ui.Context, narrow, dragging bool) {
 
 func (a *app) toolbar(c *ui.Context, narrow bool) {
 	bar := c.TitleBar()
+	exportButton := func() {
+		primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(), a.chooseExport).
+			Label("导出合并媒体").Description("每个素材导出一个文件，只拼接保留片段")
+	}
 	topbar := ui.Row(c.Key("topbar")).Absolute().Top(0).Left(0).Right(0).Height(topBarHeight).
 		AlignItems(ui.Stretch).DragWindow()
 	topbar.Children(func() {
@@ -180,11 +184,13 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 					button.Focus()
 				}
 			}
-			primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(), a.chooseExport).
-				Label("导出合并媒体").Description("每个素材导出一个文件，只拼接保留片段")
+			if narrow {
+				exportButton()
+			}
 		})
 		if !narrow {
-			ui.Box(c.Key("topbar-inspector")).Width(settingsWidth + 1).Shrink(0)
+			ui.Row(c.Key("topbar-inspector")).Width(settingsWidth+1).Shrink(0).Height(topBarHeight).
+				Padding(0, railInset, 0, railInset).AlignItems(ui.Center).Children(exportButton)
 		}
 	})
 }

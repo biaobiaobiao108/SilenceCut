@@ -321,11 +321,8 @@ func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
 			t.Fatalf("%s is not fully inside the editor column: %+v", label, r)
 		}
 	}
-	for _, label := range []string{"导出合并媒体"} {
-		r, ok := view.Find(label)
-		if !ok || r.X+r.W > width-settingsWidth-1 {
-			t.Fatalf("%s crosses the inspector divider: %+v", label, r)
-		}
+	if r, ok := view.Find("导出合并媒体"); !ok || r.X < width-settingsWidth || r.X+r.W > width {
+		t.Fatalf("export button is not above the inspector column: %+v", r)
 	}
 }
 
