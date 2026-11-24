@@ -37,8 +37,8 @@ var (
 	iconFocus   = editorIcon(`<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5M8 12h8"/>`)
 )
 
-func iconButton(c *ui.Context, icon *ui.SVG, label, hint string, enabled, primary bool, action func()) ui.Element {
-	button := flatAction(c, label, enabled, action).Width(controlHeight).Tooltip(hint)
+func iconButton(c *ui.Context, icon *ui.SVG, label string, enabled, primary bool, action func()) ui.Element {
+	button := flatAction(c, label, enabled, action).Width(controlHeight)
 	button.Children(func() {
 		ui.Icon(c, icon).Size(18, 18).TextColor(actionColor(enabled, primary))
 	})

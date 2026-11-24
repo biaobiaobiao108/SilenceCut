@@ -195,37 +195,37 @@ func (a *app) timeline(c *ui.Context) {
 				icon, label = iconPause, "暂停"
 			}
 			flatAction(c.Key("play"), label, playable, a.togglePlay).
-				Width(38).Tooltip(label + "（空格）").Children(func() {
+				Width(38).Children(func() {
 				glyph := ui.Icon(c, icon).Size(19, 19).TextColor(actionColor(playable, true))
 				if !c.Preferences().ReduceMotion {
 					glyph.ContentTransition(ui.ContentTransition{Animation: &ui.Animation{Duration: switchDuration}})
 				}
 			})
-			iconButton(c.Key("stop"), iconStop, "停止", "停止并回到开头", allowed && a.player != nil, false, func() {
+			iconButton(c.Key("stop"), iconStop, "停止", allowed && a.player != nil, false, func() {
 				a.stopPlayback()
 				a.viewStart = 0
 				a.seek(0)
-			})
+			}).Description("停止并回到开头")
 			ui.Divider(c).Height(16).AlignSelf(ui.Center).Margin(0, 3)
 			editable := allowed && current
-			iconButton(c.Key("keep"), iconKeep, "保留", "保留选区或当前片段", editable, false, func() { a.edit(true) })
-			iconButton(c.Key("discard"), iconDiscard, "移除", "移除选区或当前片段", editable, false, func() { a.edit(false) })
-			iconButton(c.Key("invert"), iconInvert, "反转短段", "从游标起反转最多 0.2 秒，止于当前片段边界",
-				editable && a.position < duration, false, a.invertAtPlayhead)
+			iconButton(c.Key("keep"), iconKeep, "保留", editable, false, func() { a.edit(true) })
+			iconButton(c.Key("discard"), iconDiscard, "移除", editable, false, func() { a.edit(false) })
+			iconButton(c.Key("invert"), iconInvert, "反转短段", editable && a.position < duration, false, a.invertAtPlayhead).
+				Description("从游标起反转最多 0.2 秒，止于当前片段边界")
 			ui.Divider(c).Height(16).AlignSelf(ui.Center).Margin(0, 3)
-			iconButton(c.Key("undo"), iconUndo, "撤销", "撤销", allowed && item.history.CanUndo(), false, func() { a.history(false) })
-			iconButton(c.Key("redo"), iconRedo, "重做", "重做", allowed && item.history.CanRedo(), false, func() { a.history(true) })
-			iconButton(c.Key("sample-threshold"), iconSample, "采集游标处音量", "采集游标处音量作为自定义阈值",
-				allowed && len(item.peaks) > 0, false, a.sampleThreshold)
+			iconButton(c.Key("undo"), iconUndo, "撤销", allowed && item.history.CanUndo(), false, func() { a.history(false) })
+			iconButton(c.Key("redo"), iconRedo, "重做", allowed && item.history.CanRedo(), false, func() { a.history(true) })
+			iconButton(c.Key("sample-threshold"), iconSample, "采集游标处音量", allowed && len(item.peaks) > 0, false, a.sampleThreshold).
+				Description("以采集的音量作为自定义阈值")
 			ui.Spacer(c)
 			ui.Row(c.Key("zoom-controls")).Gap(3).AlignItems(ui.Center).Shrink(0).Children(func() {
-				iconButton(c.Key("zoom-out"), iconZoomOut, "缩小波形", "缩小波形", length < duration, false,
+				iconButton(c.Key("zoom-out"), iconZoomOut, "缩小波形", length < duration, false,
 					func() { a.setZoom(length * 3 / 2) })
 				ui.Slider(c.Key("zoom"), &zoom, 0, 1).Width(64).Label("波形缩放").Disabled(duration <= minLength).
 					OnChange(func() {
 						a.setZoom(int64(math.Round(float64(duration) * math.Pow(float64(minLength)/float64(duration), zoom))))
 					})
-				iconButton(c.Key("zoom-in"), iconZoomIn, "放大波形", "放大波形", length > minLength, false,
+				iconButton(c.Key("zoom-in"), iconZoomIn, "放大波形", length > minLength, false,
 					func() { a.setZoom(length * 2 / 3) })
 			})
 		})
@@ -643,7 +643,7 @@ func playheadX(r ui.Rect, span timeline.Span, at int64) float32 {
 func (a *app) overview(c *ui.Context, item *asset, duration int64, allowed bool) {
 	e := ui.Box(c.Key("overview")).Height(28).Shrink(0).Radius(controlRadius).Background(waveBack).
 		BorderColor(border).BorderWidth(1).Clip().Focusable().FocusRing(true).
-		Label("全局波形").Tooltip("点击定位 · 拖动窗口浏览")
+		Label("全局波形").Description("点击定位，拖动窗口浏览")
 	length := a.detailLength(duration)
 	if allowed {
 		pan := func(delta int64) {

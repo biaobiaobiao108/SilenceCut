@@ -141,11 +141,7 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 		ui.Row(c.Key("topbar-project")).Width(sideWidth).Shrink(0).Height(topBarHeight).
 			Padding(0, railInset, 0, float32(workspaceInset)+bar.Left).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Image(c, appIcon).Size(22, 22).Shrink(0)
-			name := a.projectName()
-			label := ui.Text(c, name).FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
-			if a.projectPath != "" {
-				label.Tooltip(a.projectPath)
-			}
+			ui.Text(c, a.projectName()).FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
 			if a.projectDirty {
 				ui.Text(c, "未保存").FontSize(11).TextColor(subtle).Shrink(0)
 			}
@@ -157,14 +153,14 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 		ui.Row(c.Key("topbar-command")).Grow(1).MinWidth(0).Height(topBarHeight).
 			Padding(0, right, 0, railInset).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Row(c).Gap(1).Shrink(0).Children(func() {
-				iconButton(c.Key("project-open"), iconOpen, "打开项目", "打开项目（Ctrl/Cmd+Shift+O）", !a.busy(), false, a.chooseOpenProject)
-				iconButton(c.Key("project-save"), iconSave, "保存项目", "保存项目（Ctrl/Cmd+S）",
+				iconButton(c.Key("project-open"), iconOpen, "打开项目", !a.busy(), false, a.chooseOpenProject)
+				iconButton(c.Key("project-save"), iconSave, "保存项目",
 					!a.busy() && (a.projectDirty || a.projectPath != "" || len(a.assets) > 0),
 					false, func() { a.chooseSaveProject(nil) })
 			})
 			ui.Spacer(c)
 			if narrow && !a.focusMode {
-				button := iconButton(c.Key("settings-button"), iconSliders, "过滤设置", "过滤设置", true, a.settingsOpen,
+				button := iconButton(c.Key("settings-button"), iconSliders, "过滤设置", true, a.settingsOpen,
 					func() { a.settingsOpen = !a.settingsOpen }).AccessSelected(a.settingsOpen)
 				if a.settingsOpen {
 					button.Background(raised)
@@ -182,11 +178,7 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 					button.Focus()
 				}
 			}
-			focusHint := "隐藏两侧面板"
-			if a.focusMode {
-				focusHint = "显示两侧面板"
-			}
-			focusButton := iconButton(c.Key("focus-mode"), iconFocus, "专注模式", focusHint, true, a.focusMode, func() {
+			focusButton := iconButton(c.Key("focus-mode"), iconFocus, "专注模式", true, a.focusMode, func() {
 				a.focusMode = !a.focusMode
 				a.focusAt = c.Now()
 				if a.focusMode {
@@ -197,9 +189,9 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 				focusButton.Background(raised)
 			}
 			textAction(c.Key("export-clips"), "导出切片", !a.busy() && a.canExport(true), func() { a.chooseExport(true) }).
-				Tooltip("将素材的各段导出为独立文件")
+				Description("将素材的各段导出为独立文件")
 			primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(false), func() { a.chooseExport(false) }).
-				Label("导出合并媒体").Tooltip("每个素材导出一个文件，只拼接保留片段")
+				Label("导出合并媒体").Description("每个素材导出一个文件，只拼接保留片段")
 		})
 		if !narrow && !a.focusMode {
 			ui.Box(c.Key("topbar-inspector")).Width(settingsWidth + 1).Shrink(0)
@@ -257,8 +249,8 @@ func (a *app) library(c *ui.Context, dragging bool) {
 				ui.Textf(c, "%d", len(a.assets)).TextColor(subtle).FontSize(11).FontFeatures("tnum")
 			}
 			ui.Spacer(c)
-			iconButton(c.Key("remove"), iconRemove, "从列表移除", "移除所选素材", a.selected != nil && !a.busy(), false, a.removeSelected)
-			iconButton(c.Key("add"), iconAdd, "添加音视频…", "添加音视频文件", !a.busy(), true, a.chooseFiles)
+			iconButton(c.Key("remove"), iconRemove, "从列表移除", a.selected != nil && !a.busy(), false, a.removeSelected)
+			iconButton(c.Key("add"), iconAdd, "添加音视频…", !a.busy(), true, a.chooseFiles)
 		})
 		ui.Scroll(c.Key("assets")).Grow(1).MinHeight(0).Children(func() {
 			ui.Column(c).Gap(2).Children(func() {
@@ -272,7 +264,7 @@ func (a *app) library(c *ui.Context, dragging bool) {
 
 func (a *app) assetRow(c *ui.Context, item *asset) {
 	row := ui.Row(c).Height(52).Gap(8).AlignItems(ui.Center).Padding(0, 8).Radius(controlRadius).Focusable().FocusRing(true).
-		Label(item.name).Tooltip(item.path).OnClick(func() { a.selectAsset(item) }).
+		Label(item.name).Description(item.path).OnClick(func() { a.selectAsset(item) }).
 		Transition(reveal(c, &ui.Motion{Y: -4}, true))
 	if a.selected == item {
 		row.Background(surface).AccessSelected(true).Draw(func(p *ui.Painter, r ui.Rect) {
@@ -295,10 +287,10 @@ func (a *app) assetRow(c *ui.Context, item *asset) {
 			case item.analyzing:
 				ui.Text(c, "正在过滤…").FontSize(11).TextColor(subtle)
 			case item.issue != "":
-				ui.Text(c, item.issue).SingleLine().Ellipsis("…").Tooltip(item.issue).FontSize(11).TextColor(waveRemovedInk)
+				ui.Text(c, item.issue).SingleLine().Ellipsis("…").FontSize(11).TextColor(waveRemovedInk)
 			case item.exportIssue != "":
 				ui.Text(c, "导出失败 · "+item.exportIssue).SingleLine().Ellipsis("…").
-					Tooltip("导出失败 · " + item.exportIssue).FontSize(11).TextColor(waveRemovedInk)
+					FontSize(11).TextColor(waveRemovedInk)
 			case item.info.Duration > 0:
 				ui.Text(c, clock(item.info.Duration)).FontFeatures("tnum").FontSize(11).TextColor(subtle)
 			default:
@@ -327,7 +319,7 @@ func (a *app) editor(c *ui.Context, dragging bool) {
 				glyph = iconVideo
 			}
 			ui.Icon(c, glyph).Size(17, 17).TextColor(subtle).Shrink(0)
-			ui.Text(c, item.name).FontSize(18).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…").Tooltip(item.name)
+			ui.Text(c, item.name).FontSize(18).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
 			if item.offline && !item.pendingLoad {
 				textAction(c.Key("relink-source"), "重新定位…", !a.busy(), func() { a.relinkProjectSource(item) })
 			} else if item.info.Video {
@@ -362,7 +354,7 @@ func (a *app) previewFeedback(c *ui.Context, item *asset) {
 		return
 	}
 	ui.Column(c).Padding(railInset).Gap(8).Center().Children(func() {
-		ui.Text(c, a.previewIssue).FontSize(12).TextColor(waveRemovedInk).SingleLine().Ellipsis("…").Tooltip(a.previewIssue)
+		ui.Text(c, a.previewIssue).FontSize(12).TextColor(waveRemovedInk).SingleLine().Ellipsis("…")
 		textAction(c.Key("retry-preview"), "重试预览", !a.busy(), func() {
 			a.closePreview()
 			a.openPreview(item)
@@ -558,7 +550,7 @@ func (a *app) activity(c *ui.Context) {
 		}
 		if a.status != "" {
 			ui.Text(c.Key("job-status"), a.status).Grow(1).FontSize(12).TextColor(muted).
-				SingleLine().Ellipsis("…").Tooltip(a.status).Role(ui.RoleStatus)
+				SingleLine().Ellipsis("…").Role(ui.RoleStatus)
 		} else {
 			ui.Spacer(c).Grow(1)
 		}
