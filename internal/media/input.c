@@ -147,6 +147,30 @@ void cut_close(CutInput *in) {
     av_free(in);
 }
 
+static int seek_input(CutInput *in, int index, int64_t timestamp) {
+    int err = av_seek_frame(in->format, index, timestamp, AVSEEK_FLAG_BACKWARD);
+    if (err < 0) return err;
+    for (int i = 0; i < 2; i++)
+        if (in->decoder[i]) avcodec_flush_buffers(in->decoder[i]);
+    swr_free(&in->convert);
+    av_frame_unref(in->last_video);
+    in->active = -1;
+    in->eof = in->drain = 0;
+    in->next_pts[0] = in->next_pts[1] = AV_NOPTS_VALUE;
+    return 1;
+}
+
+int cut_seek_audio(CutInput *in, int64_t position) {
+    AVStream *stream = in->format->streams[in->audio_index];
+    int64_t timestamp = av_rescale_q(in->origin + position, AV_TIME_BASE_Q, stream->time_base);
+    return seek_input(in, in->audio_index, timestamp);
+}
+
+void cut_audio_stereo(CutInput *in) {
+    av_channel_layout_uninit(&in->layout);
+    in->layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
+}
+
 int cut_skip_gap(CutInput *in, int64_t after, int64_t before, int initial) {
     // MOV/MP4 can reposition the other tracks to the selected video index entry.
     // Leave room for reordered frames and audio decoder preroll.
@@ -168,16 +192,7 @@ int cut_skip_gap(CutInput *in, int64_t after, int64_t before, int initial) {
     } else if (!initial || before <= 5 * AV_TIME_BASE) {
         return 0;
     }
-    int err = av_seek_frame(in->format, index, timestamp, AVSEEK_FLAG_BACKWARD);
-    if (err < 0) return err;
-    for (int i = 0; i < 2; i++) avcodec_flush_buffers(in->decoder[i]);
-    // Discard resampler history from before the seek, along with the previous picture.
-    swr_free(&in->convert);
-    av_frame_unref(in->last_video);
-    in->active = -1;
-    in->eof = in->drain = 0;
-    in->next_pts[0] = in->next_pts[1] = AV_NOPTS_VALUE;
-    return 1;
+    return seek_input(in, index, timestamp);
 }
 
 void cut_error(int code, char *buf, int size) {

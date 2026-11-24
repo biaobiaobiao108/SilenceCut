@@ -93,6 +93,7 @@ func (a *app) stopPlayback() {
 	if a.buildingCut {
 		a.previewCancel()
 		a.previewCancel, a.buildingCut = nil, false
+		a.previewProgress = 0
 	}
 	if a.videoCut != nil {
 		a.closePreview()
@@ -189,7 +190,8 @@ func (a *app) timeline(c *ui.Context) {
 					}
 				}
 				if !ready || a.buildingCut {
-					ui.Column(c.Key("video-feedback")).Absolute().Left(0).Top(0).Right(0).Bottom(0).Center().Children(func() {
+					ui.Column(c.Key("video-feedback")).Absolute().Left(0).Top(0).Right(0).Bottom(0).
+						Background(screen.Alpha(.72)).Center().Children(func() {
 						a.previewFeedback(c, item)
 					})
 				}
@@ -243,7 +245,15 @@ func (a *app) invertAtPlayhead() {
 
 func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Background(waveBack).Clip().
-		Focusable().FocusRing(true).Label("音频波形和播放位置")
+		Focusable().FocusRing(true).Label("音频波形和播放位置").Description("用左右方向键移动播放游标")
+	clips := item.history.Clips
+	if i := clipAt(clips, a.position); i < len(clips) {
+		kind := "移除片段"
+		if clips[i].Keep {
+			kind = "保留片段"
+		}
+		e.Value(kind)
+	}
 	if allowed {
 		nudge := func(delta int64) {
 			a.selection = timeline.Span{}
@@ -408,12 +418,16 @@ func (a *app) drawWave(p *ui.Painter, r ui.Rect, item *asset, length int64) {
 	clips := item.history.Clips
 	mid := body.Y + body.H/2
 	first := clipAt(clips, span.Start)
+	var removed ui.Path
 	for i := first; i < len(clips) && clips[i].Start < span.End; i++ {
 		clip := clips[i]
 		left, right := timeX(body, span, max(clip.Start, span.Start)), timeX(body, span, min(clip.End, span.End))
 		color := waveRemove
 		if clip.Keep {
 			color = waveKeep
+		} else {
+			y := body.Y + body.H - 3
+			removed.MoveTo(left, y).LineTo(right, y)
 		}
 		p.Fill(ui.Rect{X: left, Y: body.Y, W: right - left, H: body.H}, color, 0)
 	}
@@ -431,6 +445,7 @@ func (a *app) drawWave(p *ui.Painter, r ui.Rect, item *asset, length int64) {
 		}
 		return waveKeptInk
 	})
+	p.StrokePath(removed.Cap(ui.ButtCap).Dash(0, 4, 3), 1, waveSelection.Alpha(.55))
 	if selected, ok := a.editSpan(); ok && selected.End > span.Start && selected.Start < span.End {
 		left := timeX(body, span, max(selected.Start, span.Start))
 		right := timeX(body, span, min(selected.End, span.End))

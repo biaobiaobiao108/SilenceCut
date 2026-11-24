@@ -15,6 +15,29 @@ copy_notice() {
   cat "$1" > "$2"
 }
 
+copy_module_notices() {
+  notices=$1
+  binary=$2
+  modules=$(go version -m "$binary" | awk '$1 == "dep" {print $2}')
+  mkdir -p "$notices/Go"
+  goroot=$(go env GOROOT)
+  if [ "$GOOS" = windows ]; then goroot=$(cygpath -u "$goroot"); fi
+  copy_notice "$goroot/LICENSE" "$notices/Go/LICENSE"
+  copy_notice "$goroot/PATENTS" "$notices/Go/PATENTS"
+  for module in $modules; do
+    module_dir=$(go list -m -f '{{.Dir}}' "$module")
+    if [ "$GOOS" = windows ]; then module_dir=$(cygpath -u "$module_dir"); fi
+    target="$notices/Go/$module"
+    mkdir -p "$target"
+    copy_notice "$module_dir/LICENSE" "$target/LICENSE"
+    for notice in NOTICE PATENTS; do
+      if [ -f "$module_dir/$notice" ]; then
+        copy_notice "$module_dir/$notice" "$target/$notice"
+      fi
+    done
+  done
+}
+
 case "$(uname -s)" in
   MINGW*|MSYS*|UCRT*)
     compiler=${ISCC:-$(command -v ISCC.exe || true)}
@@ -55,9 +78,9 @@ case "$(uname -s)" in
       cp "$runtime" "$bundle/"
     fi
     cp "$sdk/notice/"* "$bundle/Notices/FFmpeg/"
+    copy_notice LICENSE "$bundle/Notices/SilenceCut.txt"
     cp README.md "$bundle/使用说明.md"
-    mygo_dir=$(go list -m -f '{{.Dir}}' github.com/egoist/mygo)
-    copy_notice "$(cygpath -u "$mygo_dir")/LICENSE" "$bundle/Notices/Mygo.txt"
+    copy_module_notices "$bundle/Notices" "$bundle/SilenceCut.exe"
     MSYS2_ARG_CONV_EXCL='*' "$compiler" "/DAppVersion=$version" \
       "/DBundleDir=$(cygpath -w "$bundle")" "/DOutputDir=$(cygpath -w "$dest")" \
       "/DIconFile=$(cygpath -w "$icon_work/SilenceCut.ico")" "$(cygpath -w "$root/scripts/installer.iss")"
@@ -83,8 +106,9 @@ case "$(uname -s)" in
       cp -L "$lib" "$contents/Frameworks/$name"
     done
     cp "$sdk"/notice/* "$contents/Resources/Notices/FFmpeg/"
+    copy_notice LICENSE "$contents/Resources/Notices/SilenceCut.txt"
     cp README.md "$contents/Resources/使用说明.md"
-    copy_notice "$(go list -m -f '{{.Dir}}' github.com/egoist/mygo)/LICENSE" "$contents/Resources/Notices/Mygo.txt"
+    copy_module_notices "$contents/Resources/Notices" "$contents/MacOS/SilenceCut"
     cat > "$contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

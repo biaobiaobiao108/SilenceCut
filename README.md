@@ -4,14 +4,14 @@
 
 - 主波形默认显示 30 秒，可用滑杆和加减按钮缩放。点击下方全局波形定位，拖动框出的区域浏览其他时间段。
 - 直接拖动播放游标的顶部手柄或竖线，按 Escape 可恢复拖动前的位置。点击波形空白处定位，从空白处拖动可框选区间。用「保留」或「移除」修改选区或游标所在片段。拖动波形上沿的边界手柄可调整片段，改动可撤销。
-- 播放键或空格默认试听「过滤后」的结果，跳过移除段。视频首次试听或区间修改后需要准备临时预览。点「原始」可试听完整素材。图标的操作名称可通过悬停提示查看。
+- 播放键或空格默认试听「过滤后」的结果，跳过移除段。音频用内置 FFmpeg 流式解码，环绕声音轨以立体声试听。视频首次试听或区间修改后需要准备临时预览，期间可查看进度或取消。点「原始」可试听完整素材。图标的操作名称可通过悬停提示查看。
 - 音频素材在编辑区直接显示大波形，视频素材在波形上方显示画面。可从工作区任意位置拖入本地素材。
 - 窗口较窄时，从顶部「过滤设置」打开参数面板。
 
 - **导出合并媒体**为每个有保留区间的素材生成一个文件。
-- **导出切片**将区间分别写入素材的切片文件夹。勾选「切片仅导出保留段」可省略移除区间。
+- **导出切片**将区间分别写入素材的切片文件夹。勾选「切片仅导出保留段」可省略移除区间。开始前，目录选择器会显示本批次处理的素材数量。
 - 视频导出为 H.264/AAC MP4，HDR 素材会进行色调映射并输出为 SDR。音频导出为 24 位 PCM WAV。选用第一条音轨，视频输出最多保留两个声道。过滤、预览与导出都在本机运行。
-- Windows 10/11 amd64 运行 `SilenceCut-windows-x64-setup.exe`，安装后从开始菜单打开 SilenceCut。Windows N 版需要系统的 Media Feature Pack。
+- Windows 10/11 amd64 运行 `SilenceCut-windows-x64-setup.exe`，安装后从开始菜单打开 SilenceCut。当前安装包未签名。Windows N 版需要系统的 Media Feature Pack。
 - Apple Silicon（arm64）macOS 14+ 打开 `SilenceCut-macos-arm64.pkg`，安装后从「应用程序」打开 SilenceCut。当前安装包未签名和公证，安装时可能需要在「系统设置 → 隐私与安全性」中手动允许。
 - 视频导出和预览转码默认启用硬件加速。Windows 使用 D3D11VA 和 Media Foundation，macOS 使用 VideoToolbox。兼容的帧直接交给编码器，支持时在设备上缩放。驱动或编码配置不支持时自动回退到可用路径。
 - MP4 和 MOV 导出遇到较长的移除段时，会在索引可用的情况下跳到下一段附近的关键帧，再精确处理切点。定位后无法读到完整区间时，自动改用顺序解码。音频解码、静音检测、波形分析和音频导出由 CPU 处理。
@@ -38,6 +38,20 @@ sh scripts/package.sh
 
 排查视频导出或预览转码时，可在启动应用前设置 `SILENCECUT_VIDEO_ACCELERATION=software`，让这两项任务走系统的软件编解码路径。设置 `SILENCECUT_FFMPEG_DEBUG=1` 可在标准错误中查看帧传输方式、回退原因、定位次数和解码帧数。
 
+## 验证
+
+设置 `SILENCECUT_TEST_VIDEO` 指向一段至少一分钟、带有停顿的本地视频后，可用下面的命令比较过滤后预览的默认路径和强制软件路径。Windows 需要加上 `-tags mygo_nowebview`。结果同时报告源视频和预览时长，`ffprobe` 会核对代理文件的时长。
+
+```sh
+go test -run '^$' -bench '^BenchmarkLongVideoPreview$' -benchtime=1x ./internal/media
+```
+
+打包工作流在独立 Windows 和 macOS runner 上安装并启动应用。Windows 另外验证卸载。推送到 `verify/**` 分支可运行这一流程。新建标签会在安装验证通过后发布安装包。
+
+## 许可证
+
+SilenceCut 自身代码采用 [MIT 许可证](LICENSE)。安装包的 `Notices` 目录附带 SilenceCut、FFmpeg、Go 及所链接 Go 模块的许可声明。
+
 ## 参考行为
 
-AutoCutVideo 2.33.5 的 `/remove/silence` 路由连接 Go 的 `client/remove/silence`，采用 0.1 秒的 FFmpeg 静音检测。原版的三个预设使用波形推算阈值，并对检测片段加前后留白。静态依据来自 REA 的 Rust/Go 检查、内嵌网页资源及 Go 符号与反汇编。波形编辑和导出界面独立实现。
+AutoCutVideo 2.33.5 的 `/remove/silence` 路由连接 Go 的 `client/remove/silence`，采用 0.1 秒的 FFmpeg 静音检测。原版的三个预设使用波形推算阈值，并对检测片段加前后留白。静态依据来自 REA 的 Rust/Go 检查、内嵌网页资源及 Go 符号与反汇编。SilenceCut 延续 0.1 秒最低静音时长和留白预设，自动阈值使用自身的声道峰值和背景音量估算。波形编辑和导出界面独立实现。

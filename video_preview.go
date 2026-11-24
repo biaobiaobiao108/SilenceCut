@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"time"
 
 	"silencecut/internal/media"
 	"silencecut/internal/timeline"
@@ -55,7 +56,17 @@ func (a *app) prepareFilteredVideo(spans []timeline.Span) {
 			err = errors.New("素材已改变，请先重新过滤")
 		}
 		if err == nil {
-			path, err = media.Export(ctx, source, dir, "filtered-preview", spans, true, func(float64) {})
+			var updated time.Time
+			path, err = media.Export(ctx, source, dir, "filtered-preview", spans, true, func(value float64) {
+				if value == 1 || time.Since(updated) >= 100*time.Millisecond {
+					updated = time.Now()
+					a.win.Update(func() {
+						if !a.closing && seq == a.previewSeq && ctx.Err() == nil {
+							a.previewProgress = value
+						}
+					})
+				}
+			})
 		}
 		a.win.Update(func() {
 			if a.closing || seq != a.previewSeq || ctx.Err() != nil {
@@ -66,6 +77,7 @@ func (a *app) prepareFilteredVideo(spans []timeline.Span) {
 			}
 			cancel()
 			a.previewCancel, a.buildingCut = nil, false
+			a.previewProgress = 0
 			if err != nil {
 				a.status = "无法准备过滤后试听 · " + err.Error()
 				return

@@ -240,8 +240,14 @@ func (a *app) previewFeedback(c *ui.Context, item *asset) {
 				a.openPreview(item, false)
 			})
 		})
+	} else if a.buildingCut {
+		ui.Column(c).Width(sideWidth).Gap(6).Center().Children(func() {
+			ui.Textf(c, "正在准备过滤后试听 · %.0f%%", a.previewProgress*100).
+				FontSize(12).TextColor(muted).Role(ui.RoleStatus)
+			ui.Progress(c, a.previewProgress).Width(sideWidth)
+		})
 	} else {
-		ui.Text(c, "正在准备预览…").FontSize(12).TextColor(muted)
+		ui.Text(c, "正在准备预览…").FontSize(12).TextColor(muted).Role(ui.RoleStatus)
 	}
 }
 
@@ -273,6 +279,11 @@ func (a *app) previewTick(c *ui.Context) {
 					a.previewIssue = issue
 				}
 			}
+		}
+	} else if preview, ok := a.player.(interface{ Err() error }); ok {
+		if err := preview.Err(); err != nil {
+			a.closePreview()
+			a.previewIssue = err.Error()
 		}
 	}
 	if a.updatePlaybackPosition() {
@@ -372,7 +383,7 @@ func (a *app) sampleThreshold() {
 	}
 	bin := min(int(a.position*int64(item.info.Rate)/timeline.Second/timeline.PeakSamples), len(item.peaks)-1)
 	p := item.peaks[bin]
-	amplitude := max(math.Abs(float64(p.Min)), math.Abs(float64(p.Max))) / 32768
+	amplitude := p.Magnitude()
 	level := max(-70, 20*math.Log10(amplitude))
 	a.opts.preset, a.opts.level = "自定义", strconv.FormatFloat(level, 'f', 1, 64)
 }

@@ -5,10 +5,23 @@ import (
 	"testing"
 )
 
-func TestAutomaticThresholdUsesEightBitPeaks(t *testing.T) {
-	peaks := []Peak{{Min: -4096, Max: 4096}, {Min: -100, Max: 100}, {}}
-	if got := AutomaticThreshold(peaks, 48000); got != -29.4 {
-		t.Fatalf("threshold = %.1f dB, want -29.4 dB", got)
+func TestAutomaticThreshold(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		peaks []Peak
+		want  float64
+	}{
+		{"digital silence", []Peak{{}, {}}, -70},
+		{"quiet signal", []Peak{{Min: -100}, {Max: 110}, {}}, -65},
+		{"constant background", []Peak{{Max: 100}, {Min: -100}, {Max: 100}, {Max: 4096}, {Min: -4096}}, -44},
+		{"single least significant bit", []Peak{{Max: 1}}, -96},
+		{"full scale negative", []Peak{{Min: -32768}}, -36},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AutomaticThreshold(tt.peaks); got != tt.want {
+				t.Fatalf("threshold = %.1f dB, want %.1f dB", got, tt.want)
+			}
+		})
 	}
 }
 

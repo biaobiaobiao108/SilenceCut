@@ -18,11 +18,6 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
-	_ "github.com/egoist/mygo/audio/aac"
-	_ "github.com/egoist/mygo/audio/flac"
-	_ "github.com/egoist/mygo/audio/mp3"
-	_ "github.com/egoist/mygo/audio/mp4"
-	_ "github.com/egoist/mygo/audio/vorbis"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/video"
 
@@ -125,6 +120,7 @@ type app struct {
 	video                          *ui.VideoPlayer
 	previewIssue                   string
 	previewSince                   time.Time
+	previewProgress                float64
 	videoCut                       *filteredVideo
 	buildingCut, previewPlay       bool
 	wasPlaying                     bool
@@ -372,7 +368,7 @@ func (a *app) filter(items []*asset) {
 				current.info, current.peaks, err = media.Waveform(ctx, current.path, func(value float64) { update(value * .45) })
 				if err == nil {
 					current.waveform = timeline.BuildWaveform(current.peaks)
-					current.automatic = timeline.AutomaticThreshold(current.peaks, current.info.Rate)
+					current.automatic = timeline.AutomaticThreshold(current.peaks)
 					current.file, current.proxy = stat, ""
 				}
 			}
@@ -448,26 +444,38 @@ func changed(before, after os.FileInfo) bool {
 }
 
 func (a *app) chooseExport(clips bool) {
-	if a.busy() || !a.canExport(clips) {
+	if a.busy() {
+		return
+	}
+	count := 0
+	for _, item := range a.assets {
+		if a.exportable(item, clips) {
+			count++
+		}
+	}
+	if count == 0 {
 		return
 	}
 	a.pick(mygo.OpenDialogOptions{
-		Parent: a.win, Title: "选择导出文件夹", DefaultPath: a.outputDir,
-		Directory: true, CreateDirectories: true, ButtonLabel: "导出",
+		Parent: a.win, Title: fmt.Sprintf("为 %d 个素材选择导出文件夹", count), DefaultPath: a.outputDir,
+		Directory: true, CreateDirectories: true, ButtonLabel: fmt.Sprintf("导出 %d 个素材", count),
 	}, func(paths []string) { a.export(paths[0], clips) })
 }
 
 func (a *app) canExport(clips bool) bool {
-	return slices.ContainsFunc(a.assets, func(item *asset) bool {
-		return item.issue == "" && (clips && !a.onlyKept && len(item.history.Clips) > 0 || len(timeline.Kept(item.history.Clips)) > 0)
-	})
+	return slices.ContainsFunc(a.assets, func(item *asset) bool { return a.exportable(item, clips) })
+}
+
+func (a *app) exportable(item *asset, clips bool) bool {
+	return item.issue == "" && (clips && !a.onlyKept && len(item.history.Clips) > 0 ||
+		slices.ContainsFunc(item.history.Clips, func(clip timeline.Clip) bool { return clip.Keep }))
 }
 
 func (a *app) export(dir string, clips bool) {
 	a.outputDir = dir
 	var work []asset
 	for _, item := range a.assets {
-		if item.issue == "" && len(item.history.Clips) > 0 {
+		if a.exportable(item, clips) {
 			work = append(work, *item)
 		}
 	}
@@ -579,6 +587,7 @@ func (a *app) closePreview() {
 	a.player, a.video, a.previewIssue = nil, nil, ""
 	a.videoCut = nil
 	a.buildingCut, a.previewPlay, a.wasPlaying = false, false, false
+	a.previewProgress = 0
 }
 
 func (a *app) openPreview(item *asset, proxy bool) {
@@ -601,6 +610,7 @@ func (a *app) openPreview(item *asset, proxy bool) {
 			return
 		}
 		a.previewIssue = err.Error()
+		return
 	}
 	if !proxy {
 		a.makePreview(item)
@@ -717,11 +727,7 @@ func (a *app) prepareAudioPlayback(clips []timeline.Clip) bool {
 	if a.originalPreview {
 		clips = nil
 	}
-	path := a.selected.path
-	if a.selected.proxy != "" {
-		path = a.selected.proxy
-	}
-	p, err := openAudioPreview(path, clips)
+	p, err := openAudioPreview(a.selected.path, clips)
 	if err != nil {
 		a.status = "无法开始试听 · " + err.Error()
 		return false

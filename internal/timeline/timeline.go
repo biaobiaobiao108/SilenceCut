@@ -128,19 +128,42 @@ const PeakSamples = 256
 
 type Peak struct{ Min, Max int16 }
 
-func AutomaticThreshold(peaks []Peak, sampleRate int) float64 {
-	var sum float64
+func AutomaticThreshold(peaks []Peak) float64 {
+	// Quantize the magnitude distribution to dBFS. Exclude digital silence
+	// when estimating the typical signal and the background level.
+	const floor = -91
+	var bins [1 - floor]int
 	var count int
 	for _, peak := range peaks {
-		// The reference threshold formula takes 8-bit peaks. Keep 16 bits for drawing.
-		magnitude := (math.Abs(float64(peak.Min/256)) + math.Abs(float64(peak.Max/256))) / 2
-		if magnitude > 0 {
-			sum += 5 * math.Log10(magnitude/(float64(sampleRate)*PeakSamples))
+		if magnitude := peak.Magnitude(); magnitude > 0 {
+			level := int(math.Round(20 * math.Log10(magnitude)))
+			bins[level-floor]++
 			count++
 		}
 	}
 	if count == 0 {
+		return -70
+	}
+	percentile := func(percent int) float64 {
+		rank := (count*percent + 99) / 100
+		for i, n := range bins {
+			rank -= n
+			if rank <= 0 {
+				return float64(floor + i)
+			}
+		}
 		return 0
 	}
-	return math.Round(sum/float64(count)*10) / 10
+	background, signal := percentile(20), percentile(90)
+	threshold := min(-36, signal-16)
+	// Follow a clearly separated background level while leaving room for
+	// quiet speech above it.
+	if background <= -36 && signal-background >= 16 {
+		threshold = min(background+6, signal-12)
+	}
+	return max(-96, threshold)
+}
+
+func (p Peak) Magnitude() float64 {
+	return float64(max(-int(p.Min), int(p.Max))) / 32768
 }

@@ -1,7 +1,9 @@
 name: Package
 
 on:
+  workflow_dispatch:
   push:
+    branches: ['verify/**']
     tags: ['**']
 
 permissions:
@@ -13,7 +15,7 @@ env:
 jobs:
   windows:
     name: Windows amd64
-    if: github.event.created && !github.event.deleted
+    if: github.event_name == 'workflow_dispatch' || !github.event.deleted
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v7
@@ -45,7 +47,7 @@ jobs:
 
   macos:
     name: macOS arm64
-    if: github.event.created && !github.event.deleted
+    if: github.event_name == 'workflow_dispatch' || !github.event.deleted
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -66,9 +68,47 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+  verify-windows:
+    name: Verify Windows installer
+    needs: windows
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: SilenceCut-windows-x64-setup.exe
+      - name: Install, launch and uninstall
+        run: ./scripts/check-windows-install.ps1 -Installer ./SilenceCut-windows-x64-setup.exe
+
+  verify-macos:
+    name: Verify macOS installer
+    needs: macos
+    runs-on: macos-15
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: SilenceCut-macos-arm64.pkg
+      - name: Install and launch
+        run: |
+          set -eu
+          sudo installer -pkg SilenceCut-macos-arm64.pkg -target /
+          app=/Applications/SilenceCut.app
+          for notice in SilenceCut.txt Go/LICENSE FFmpeg/LICENSE.md; do
+            test -s "$app/Contents/Resources/Notices/$notice"
+          done
+          codesign --verify --strict --deep "$app"
+          env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" PATH=/usr/bin:/bin "$app/Contents/MacOS/SilenceCut" &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          sleep 5
+          kill -0 "$pid"
+
   release:
     name: Publish GitHub Release
-    needs: [windows, macos]
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.event.created
+    needs: [verify-windows, verify-macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

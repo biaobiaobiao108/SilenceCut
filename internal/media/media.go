@@ -88,7 +88,7 @@ func Waveform(ctx context.Context, path string, progress Progress) (Info, []time
 		if frame.samples == 0 {
 			return false, nil
 		}
-		start := sampleIndex(int64(frame.pts), info.Rate)
+		start := audioFrameStart(sampleIndex(int64(frame.pts), info.Rate), until, info.Rate)
 		channels := info.Channels
 		pcm := unsafe.Slice((*float32)(unsafe.Pointer(frame.audio)), int(frame.samples)*channels)
 		end := start + int64(frame.samples)
@@ -97,15 +97,13 @@ func Waveform(ctx context.Context, path string, progress Progress) (Info, []time
 			for len(peaks) <= bin {
 				peaks = append(peaks, timeline.Peak{})
 			}
-			var level float32
+			peak := &peaks[bin]
 			offset := int(pos-start) * channels
 			for _, sample := range pcm[offset : offset+channels] {
-				level += sample
+				value := int16(max(-32768, min(32767, float64(sample)*32768)))
+				peak.Min = min(peak.Min, value)
+				peak.Max = max(peak.Max, value)
 			}
-			value := int16(max(-32768, min(32767, float64(level)/float64(channels)*32768)))
-			peak := &peaks[bin]
-			peak.Min = min(peak.Min, value)
-			peak.Max = max(peak.Max, value)
 		}
 		until = max(until, end)
 		progress(fraction(int64(frame.pts), info.Duration))
@@ -137,16 +135,11 @@ func Detect(ctx context.Context, path string, settings timeline.Settings, progre
 		}
 		quiet = 0
 	}
-	// Some containers round packet timestamps to milliseconds.
-	jitter := int64((info.Rate + 999) / 1000)
 	err = frames(ctx, in, func(kind C.int, frame *C.CutFrame) (bool, error) {
 		if frame.samples == 0 {
 			return false, nil
 		}
-		start := sampleIndex(int64(frame.pts), info.Rate)
-		if abs := max(start-cursor, cursor-start); abs <= jitter {
-			start = cursor
-		}
+		start := audioFrameStart(sampleIndex(int64(frame.pts), info.Rate), cursor, info.Rate)
 		if start > cursor {
 			quiet += start - cursor
 			cursor = start
@@ -564,6 +557,14 @@ func (a *audioWriter) advance() error {
 
 func sampleIndex(us int64, rate int) int64 {
 	return int64(math.Round(float64(us) * float64(rate) / float64(timeline.Second)))
+}
+
+func audioFrameStart(start, previousEnd int64, rate int) int64 {
+	// Some containers round packet timestamps to milliseconds.
+	if max(start-previousEnd, previousEnd-start) <= int64((rate+999)/1000) {
+		return previousEnd
+	}
+	return start
 }
 
 func fraction(done, total int64) float64 {

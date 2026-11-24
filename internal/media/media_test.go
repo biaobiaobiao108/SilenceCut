@@ -21,6 +21,10 @@ import (
 func discardProgress(float64) {}
 
 func toneFixture(t *testing.T) string {
+	return stereoFixture(t, 12000, 0, func(int16) int16 { return 0 })
+}
+
+func stereoFixture(t *testing.T, peak, background int16, right func(int16) int16) string {
 	t.Helper()
 	const rate = 48000
 	const length = rate * 2
@@ -35,13 +39,13 @@ func toneFixture(t *testing.T) string {
 	wav.WriteString("data")
 	_ = binary.Write(&wav, order, uint32(length*4))
 	for i := range length {
-		v := int16(0)
+		amplitude := background
 		if i >= rate/4 && i < rate*3/4 || i >= rate && i < rate*3/2 {
-			v = int16(12000 * math.Sin(float64(i)*2*math.Pi*440/rate))
+			amplitude = peak
 		}
-		// One audible channel must keep a sample.
+		v := int16(float64(amplitude) * math.Sin(float64(i)*2*math.Pi*440/rate))
 		_ = binary.Write(&wav, order, v)
-		_ = binary.Write(&wav, order, int16(0))
+		_ = binary.Write(&wav, order, right(v))
 	}
 	path := filepath.Join(t.TempDir(), "两段口播.wav")
 	if err := os.WriteFile(path, wav.Bytes(), 0644); err != nil {
@@ -104,6 +108,43 @@ func TestWAVRoundTrip(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(dest, "*"))
 	if err != nil || !reflect.DeepEqual(files, []string{two, one}) {
 		t.Fatalf("unexpected output directory: %v %v", files, err)
+	}
+}
+
+func TestAutomaticDetectionUsesAllChannels(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		peak, background int16
+		right            func(int16) int16
+	}{
+		{"opposite phase", 12000, 0, func(v int16) int16 { return -v }},
+		{"one channel", 12000, 0, func(int16) int16 { return 0 }},
+		{"quiet speech level", 40, 0, func(v int16) int16 { return v }},
+		{"continuous background", 6000, 120, func(v int16) int16 { return v }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := stereoFixture(t, tt.peak, tt.background, tt.right)
+			_, peaks, err := Waveform(ctx, path, discardProgress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			threshold := timeline.AutomaticThreshold(peaks)
+			clips, err := Detect(ctx, path, timeline.Settings{Threshold: threshold}, discardProgress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []timeline.Span{{Start: 250000, End: 750000}, {Start: 1000000, End: 1500000}}
+			kept := timeline.Kept(clips)
+			if len(kept) != len(want) {
+				t.Fatalf("threshold %.1f dB retained %v, want %v", threshold, kept, want)
+			}
+			for i, span := range kept {
+				if math.Abs(float64(span.Start-want[i].Start)) > 1500 || math.Abs(float64(span.End-want[i].End)) > 1500 {
+					t.Fatalf("threshold %.1f dB retained %v, want %v", threshold, kept, want)
+				}
+			}
+		})
 	}
 }
 
@@ -398,5 +439,65 @@ func TestIndexedExportMatchesSequential(t *testing.T) {
 	score, err := strconv.ParseFloat(strings.Fields(raw)[0], 64)
 	if err != nil || score < .995 {
 		t.Fatalf("seeking changed decoded video: SSIM %f (%v)", score, err)
+	}
+}
+
+func BenchmarkLongVideoPreview(b *testing.B) {
+	source := os.Getenv("SILENCECUT_TEST_VIDEO")
+	if source == "" {
+		b.Skip("set SILENCECUT_TEST_VIDEO to a long video with pauses")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := b.Context()
+	info, peaks, err := Waveform(ctx, source, discardProgress)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !info.Video || info.Duration < 60*timeline.Second {
+		b.Fatalf("expected at least a minute of video: %+v", info)
+	}
+	settings := timeline.Settings{Threshold: timeline.AutomaticThreshold(peaks), Before: 250000, After: 250000}
+	clips, err := Detect(ctx, source, settings, discardProgress)
+	if err != nil {
+		b.Fatal(err)
+	}
+	spans := timeline.Kept(clips)
+	var duration int64
+	for _, span := range spans {
+		duration += span.End - span.Start
+	}
+	if len(spans) < 2 || duration >= info.Duration {
+		b.Fatalf("expected multiple retained parts, got %d", len(spans))
+	}
+	for _, mode := range []string{"auto", "software"} {
+		b.Run(mode, func(b *testing.B) {
+			b.Setenv("SILENCECUT_VIDEO_ACCELERATION", mode)
+			dir := b.TempDir()
+			for b.Loop() {
+				path, err := Export(b.Context(), source, dir, "preview", spans, true, discardProgress)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.StopTimer()
+				out, err := exec.Command(ffprobe, "-v", "error", "-show_entries",
+					"format=duration", "-of", "csv=p=0", path).CombinedOutput()
+				if err != nil {
+					b.Fatalf("checking proxy duration: %v %s", err, out)
+				}
+				actual, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+				if err != nil || math.Abs(actual-float64(duration)/float64(timeline.Second)) > .1 {
+					b.Fatalf("unexpected proxy duration %s for %d µs of retained media", out, duration)
+				}
+				if err := os.Remove(path); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+			}
+			b.ReportMetric(float64(info.Duration)/float64(timeline.Second), "source-s")
+			b.ReportMetric(float64(duration)/float64(timeline.Second), "preview-s")
+		})
 	}
 }

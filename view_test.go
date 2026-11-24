@@ -115,7 +115,7 @@ func TestCaptureVoiceWaveform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	level := timeline.AutomaticThreshold(peaks, info.Rate)
+	level := timeline.AutomaticThreshold(peaks)
 	settings := timeline.Settings{Threshold: level, Before: 250_000, After: 250_000}
 	clips, err := media.Detect(context.Background(), source, settings, func(float64) {})
 	if err != nil {
@@ -438,5 +438,24 @@ func TestBatchStatusAndPublishedFolder(t *testing.T) {
 	view.Frame()
 	if !view.HasText("导出部分成功 · 已导出 1 个文件 · 1 个素材失败 · 文件丢失") || !view.HasText("打开导出文件夹") {
 		t.Fatal("partial export did not expose the result status and folder")
+	}
+}
+
+func TestFilteredVideoPreparationFeedback(t *testing.T) {
+	item := &asset{info: media.Info{Duration: 2 * timeline.Second, Video: true}}
+	canceled := false
+	a := &app{
+		assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"},
+		buildingCut: true, previewProgress: .42, previewCancel: func() { canceled = true },
+	}
+	view := ui.NewTester(a.view, 930, 690)
+	if !view.HasText("正在准备过滤后试听 · 42%") {
+		t.Fatal("filtered video preparation has no progress feedback")
+	}
+	if err := view.Click("取消准备试听"); err != nil {
+		t.Fatal(err)
+	}
+	if !canceled || a.buildingCut || a.previewProgress != 0 {
+		t.Fatal("cancel must clear pending preview and progress")
 	}
 }

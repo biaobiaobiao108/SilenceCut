@@ -3,12 +3,12 @@ package main
 import (
 	"io"
 	"math"
-	"os"
 	"sort"
 	"time"
 
 	"github.com/egoist/mygo/audio"
 
+	"silencecut/internal/media"
 	"silencecut/internal/timeline"
 )
 
@@ -33,9 +33,9 @@ func newAuditionDecoder(d audio.Decoder, closer io.Closer, clips []timeline.Clip
 		if !clip.Keep {
 			continue
 		}
-		// Include frames whose timestamps fall in the half-open clip interval.
-		start := (clip.Start*rate + timeline.Second - 1) / timeline.Second
-		end := (clip.End*rate + timeline.Second - 1) / timeline.Second
+		// Round cut points to source samples, as in the media exporter.
+		start := (clip.Start*rate + timeline.Second/2) / timeline.Second
+		end := (clip.End*rate + timeline.Second/2) / timeline.Second
 		if d.Len() >= 0 {
 			end = min(end, d.Len())
 		}
@@ -101,32 +101,30 @@ func (d *auditionDecoder) Read(buf []float32) (int, error) {
 	return written, nil
 }
 
-type auditionPlayer struct {
+type audioPreview struct {
 	*audio.Player
+	decoder *media.AudioDecoder
+}
+
+func (p *audioPreview) Err() error { return p.decoder.Err() }
+
+type auditionPlayer struct {
+	*audioPreview
 	spans []auditionSpan
 	rate  int64
 	clips []timeline.Clip
 }
 
 func openAudioPreview(path string, clips []timeline.Clip) (player, error) {
-	f, err := os.Open(path)
+	raw, err := media.OpenAudio(path)
 	if err != nil {
 		return nil, err
 	}
 	if clips == nil {
-		p, err := audio.OpenStream(f)
-		if err != nil {
-			_ = f.Close()
-		}
-		return p, err
+		return &audioPreview{audio.NewPlayer(raw), raw}, nil
 	}
-	raw, _, err := audio.NewDecoder(f)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	d := newAuditionDecoder(raw, f, clips)
-	return &auditionPlayer{audio.NewPlayer(d), d.spans, int64(raw.SampleRate()), clips}, nil
+	d := newAuditionDecoder(raw, raw, clips)
+	return &auditionPlayer{&audioPreview{audio.NewPlayer(d), raw}, d.spans, int64(raw.SampleRate()), clips}, nil
 }
 
 func (p *auditionPlayer) Position() time.Duration {

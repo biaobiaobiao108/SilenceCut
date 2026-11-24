@@ -1,16 +1,104 @@
 package main
 
 import (
+	"context"
 	"io"
+	"math"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"testing"
 
+	"silencecut/internal/media"
 	"silencecut/internal/timeline"
 )
 
 type sampleSource struct {
 	samples []float32
 	at      int
+}
+
+func TestAudioFormatWorkflow(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate audio fixtures")
+	}
+	for _, tc := range []struct{ extension, encoder string }{
+		{"wav", "pcm_s16le"}, {"opus", "libopus"}, {"aiff", "pcm_s16be"},
+		{"caf", "pcm_s16le"}, {"wma", "wmav2"}, {"ac3", "ac3"},
+	} {
+		t.Run(tc.extension, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, "素材."+tc.extension)
+			out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+				"aevalsrc='0.2*sin(2*PI*440*t)*(between(t,0.5,2)+between(t,5,7)+between(t,9,11))':s=48000:d=12",
+				"-c:a", tc.encoder, source).CombinedOutput()
+			if err != nil {
+				t.Fatalf("fixture: %v\n%s", err, out)
+			}
+			ctx := context.Background()
+			progress := func(float64) {}
+			_, peaks, err := media.Waveform(ctx, source, progress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clips, err := media.Detect(ctx, source, timeline.Settings{Threshold: timeline.AutomaticThreshold(peaks)}, progress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept := timeline.Kept(clips)
+			if len(kept) != 3 {
+				t.Fatalf("retained %v", kept)
+			}
+			for _, mode := range [][]timeline.Clip{nil, clips} {
+				p, err := openAudioPreview(source, mode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.Close()
+			}
+			original, err := media.OpenAudio(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer original.Close()
+			assertLevel := func(d interface {
+				Read([]float32) (int, error)
+				SetPosition(int64) error
+			}, frame int64, loud bool) {
+				t.Helper()
+				if err := d.SetPosition(frame); err != nil {
+					t.Fatal(err)
+				}
+				buf := make([]float32, 4096)
+				n, err := d.Read(buf)
+				var peak float64
+				for _, sample := range buf[:n] {
+					peak = max(peak, math.Abs(float64(sample)))
+				}
+				if err != nil || n != len(buf) || loud && peak < .1 || !loud && peak > .01 {
+					t.Fatalf("frame %d, loud=%t: peak %.3f, %d samples, error %v", frame, loud, peak, n, err)
+				}
+			}
+			assertLevel(original, 48000, true)
+			assertLevel(original, 3*48000, false)
+			assertLevel(original, 10*48000, true)
+			assertLevel(original, 48000, true)
+			cut := newAuditionDecoder(original, nil, clips)
+			boundary := cut.spans[2].editedStart
+			assertLevel(cut, boundary+24000, true)
+			rendered, err := media.Export(ctx, source, dir, "导出", kept, false, progress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, _, err := media.Waveform(ctx, rendered, progress)
+			// The exporter rounds cumulative time, so independent source cuts
+			// can differ by up to one sample per retained interval.
+			if err != nil || math.Abs(float64(info.Duration-cut.Len()*timeline.Second/48000)) > float64(len(kept))*22 {
+				t.Fatalf("exported %d µs, preview %d samples, error %v", info.Duration, cut.Len(), err)
+			}
+		})
+	}
 }
 
 func (s *sampleSource) SampleRate() int { return 1000 }
@@ -51,5 +139,38 @@ func TestAuditionReadsOnlyRetainedSamples(t *testing.T) {
 	n, err = d.Read(buf)
 	if err != nil || !slices.Equal(buf[:n], []float32{.3, .4}) {
 		t.Fatalf("seek across removed region = %v, error %v", buf[:n], err)
+	}
+}
+
+func TestPreviewDownmixesCenterChannel(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate a surround fixture")
+	}
+	source := filepath.Join(t.TempDir(), "center.flac")
+	out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+		"aevalsrc='0|0|0.4*sin(2*PI*440*t)|0|0|0':s=48000:d=1:c=5.1", source).CombinedOutput()
+	if err != nil {
+		t.Fatalf("fixture: %v\n%s", err, out)
+	}
+	decoder, err := media.OpenAudio(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoder.Close()
+	if decoder.Channels() != 2 {
+		t.Fatalf("preview has %d channels", decoder.Channels())
+	}
+	var pcm [2048]float32
+	n, err := decoder.Read(pcm[:])
+	if err != nil || n != len(pcm) {
+		t.Fatalf("read %d samples: %v", n, err)
+	}
+	var left, right float32
+	for i := 0; i < n; i += 2 {
+		left, right = max(left, pcm[i]), max(right, pcm[i+1])
+	}
+	if left < .1 || right < .1 {
+		t.Fatalf("center channel lost in stereo: left %.3f right %.3f", left, right)
 	}
 }
