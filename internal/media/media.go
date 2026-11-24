@@ -123,47 +123,66 @@ func Detect(ctx context.Context, path string, settings timeline.Settings, progre
 		return nil, err
 	}
 	defer C.cut_close(in)
-	if code := C.cut_detect(in, C.double(settings.Threshold)); code < 0 {
-		return nil, avError("无法启动静音检测", code)
-	}
 	var gaps []timeline.Span
-	start := int64(math.MinInt64)
-	lastAudioEnd := int64(0)
+	var cursor, quiet int64
+	var hasAudio bool
+	minQuiet := int64((info.Rate + 9) / 10)
+	threshold := float32(math.Pow(10, settings.Threshold/20))
+	toTime := func(sample int64) int64 {
+		return (sample*timeline.Second + int64(info.Rate)/2) / int64(info.Rate)
+	}
+	finishQuiet := func(end int64) {
+		if quiet >= minQuiet {
+			gaps = appendGap(gaps, toTime(cursor-quiet), end, info.Duration)
+		}
+		quiet = 0
+	}
+	// Some containers round packet timestamps to milliseconds.
+	jitter := int64((info.Rate + 999) / 1000)
 	err = frames(ctx, in, func(kind C.int, frame *C.CutFrame) (bool, error) {
 		if frame.samples == 0 {
 			return false, nil
 		}
-		pts := int64(frame.pts)
-		if lastAudioEnd == 0 && pts >= timeline.Second/10 {
-			gaps = appendGap(gaps, 0, pts, info.Duration)
+		start := sampleIndex(int64(frame.pts), info.Rate)
+		if abs := max(start-cursor, cursor-start); abs <= jitter {
+			start = cursor
 		}
-		lastAudioEnd = max(lastAudioEnd, pts+int64(frame.samples)*timeline.Second/int64(info.Rate))
-		detectedStart, detectedEnd := int64(frame.silence_start), int64(frame.silence_end)
-		if detectedEnd != math.MinInt64 && detectedStart >= detectedEnd && start != math.MinInt64 {
-			gaps = appendGap(gaps, start, detectedEnd, info.Duration)
-			start = math.MinInt64
+		if start > cursor {
+			quiet += start - cursor
+			cursor = start
 		}
-		if detectedStart != math.MinInt64 {
-			start = detectedStart
+		channels := info.Channels
+		pcm := unsafe.Slice((*float32)(unsafe.Pointer(frame.audio)), int(frame.samples)*channels)
+		for i := max(0, cursor-start); i < int64(frame.samples); i++ {
+			at := int(i) * channels
+			silent := true
+			for _, sample := range pcm[at : at+channels] {
+				if !(sample > -threshold && sample < threshold) {
+					silent = false
+					break
+				}
+			}
+			if silent {
+				quiet++
+			} else if quiet > 0 {
+				finishQuiet(toTime(cursor))
+			}
+			cursor++
 		}
-		if detectedEnd != math.MinInt64 && start != math.MinInt64 && start < detectedEnd {
-			gaps = appendGap(gaps, start, detectedEnd, info.Duration)
-			start = math.MinInt64
-		}
-		progress(fraction(pts, info.Duration))
+		hasAudio = true
+		progress(fraction(int64(frame.pts), info.Duration))
 		return false, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if lastAudioEnd == 0 {
+	if !hasAudio {
 		return nil, errors.New("音轨没有可解码的数据")
 	}
-	if start != math.MinInt64 {
-		gaps = appendGap(gaps, start, info.Duration, info.Duration)
-	} else if info.Duration-lastAudioEnd >= timeline.Second/10 {
-		gaps = appendGap(gaps, lastAudioEnd, info.Duration, info.Duration)
-	}
+	end := max(cursor, sampleIndex(info.Duration, info.Rate))
+	quiet += end - cursor
+	cursor = end
+	finishQuiet(info.Duration)
 	return timeline.Filter(info.Duration, gaps, settings), nil
 }
 

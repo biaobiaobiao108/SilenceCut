@@ -22,7 +22,8 @@ struct CutOutput {
     int gpu_width, gpu_height;
     AVAudioFifo *fifo;
     SwrContext *resample;
-    struct SwsContext *scale;
+    SwsContext *scale, *tone_map;
+    enum AVColorTransferCharacteristic source_transfer;
     int64_t audio_pts, video_pts;
     int source_channels;
 };
@@ -70,6 +71,10 @@ static int add_audio(CutOutput *out, CutInput *in, int is_video) {
     return swr_init(out->resample);
 }
 
+static int is_hdr(enum AVColorTransferCharacteristic transfer) {
+    return transfer == AVCOL_TRC_SMPTE2084 || transfer == AVCOL_TRC_ARIB_STD_B67;
+}
+
 static int add_video(CutOutput *out, CutInput *in, int proxy) {
 #ifdef _WIN32
     const char *name = "h264_mf";
@@ -94,7 +99,15 @@ static int add_video(CutOutput *out, CutInput *in, int proxy) {
     if (v->framerate.num <= 0 || v->framerate.den <= 0) v->framerate = (AVRational){30, 1};
     v->time_base = (AVRational){1, 90000};
     v->sample_aspect_ratio = av_guess_sample_aspect_ratio(in->format, stream, NULL);
-    int direct = in->mode == CUT_DIRECT && in->hardware_format != AV_PIX_FMT_NONE;
+    out->source_transfer = is_hdr(stream->codecpar->color_trc) ? stream->codecpar->color_trc : source->color_trc;
+    int hdr = is_hdr(out->source_transfer);
+    if (hdr) {
+        v->color_primaries = AVCOL_PRI_BT709;
+        v->color_trc = AVCOL_TRC_BT709;
+        v->colorspace = AVCOL_SPC_BT709;
+        v->color_range = AVCOL_RANGE_MPEG;
+    }
+    int direct = !hdr && in->mode == CUT_DIRECT && in->hardware_format != AV_PIX_FMT_NONE;
     v->pix_fmt = direct ? in->hardware_format : AV_PIX_FMT_NV12;
     if (direct) v->sw_pix_fmt = AV_PIX_FMT_NV12;
     v->max_b_frames = 0;
@@ -290,8 +303,11 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
     const AVCodecContext *v = out->video;
     AVHWFramesContext *hardware = source->hw_frames_ctx ? (AVHWFramesContext *)source->hw_frames_ctx->data : NULL;
     int err;
+    enum AVColorTransferCharacteristic transfer = source->color_trc == AVCOL_TRC_UNSPECIFIED ?
+        out->source_transfer : source->color_trc;
+    int hdr = is_hdr(transfer);
     if (v->pix_fmt != AV_PIX_FMT_NV12) {
-        if (!hardware || source->format != v->pix_fmt)
+        if (hdr || !hardware || source->format != v->pix_fmt)
             return AVERROR(ENOSYS);
         av_frame_unref(dest);
         if (hardware->sw_format == AV_PIX_FMT_NV12 && source->width == v->width && source->height == v->height) {
@@ -314,14 +330,34 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
             if (!out->download) return AVERROR(ENOMEM);
             av_frame_unref(out->download);
             if ((err = av_hwframe_transfer_data(out->download, source, 0)) < 0) return err;
+            if (hdr && (err = av_frame_copy_props(out->download, source)) < 0) return err;
             source = out->download;
         }
-        out->scale = sws_getCachedContext(out->scale, source->width, source->height, source->format,
-                                         dest->width, dest->height, dest->format, SWS_BILINEAR, NULL, NULL, NULL);
-        if (!out->scale) return AVERROR(EINVAL);
         if ((err = av_frame_make_writable(dest)) < 0) return err;
-        err = sws_scale(out->scale, (const uint8_t * const *)source->data, source->linesize,
-                        0, source->height, dest->data, dest->linesize);
+        if (hdr) {
+            if (!out->tone_map) {
+                out->tone_map = sws_alloc_context();
+                if (!out->tone_map) return AVERROR(ENOMEM);
+                out->tone_map->flags = SWS_BILINEAR;
+                out->tone_map->intent = SWS_INTENT_PERCEPTUAL;
+            }
+            AVFrame input = *source;
+            input.color_trc = transfer;
+            if (input.color_primaries == AVCOL_PRI_UNSPECIFIED) input.color_primaries = AVCOL_PRI_BT2020;
+            if (input.colorspace == AVCOL_SPC_UNSPECIFIED) input.colorspace = AVCOL_SPC_BT2020_NCL;
+            if (input.color_range == AVCOL_RANGE_UNSPECIFIED) input.color_range = AVCOL_RANGE_MPEG;
+            dest->color_primaries = AVCOL_PRI_BT709;
+            dest->color_trc = AVCOL_TRC_BT709;
+            dest->colorspace = AVCOL_SPC_BT709;
+            dest->color_range = AVCOL_RANGE_MPEG;
+            err = sws_scale_frame(out->tone_map, dest, &input);
+        } else {
+            out->scale = sws_getCachedContext(out->scale, source->width, source->height, source->format,
+                                             dest->width, dest->height, dest->format, SWS_BILINEAR, NULL, NULL, NULL);
+            if (!out->scale) return AVERROR(EINVAL);
+            err = sws_scale(out->scale, (const uint8_t * const *)source->data, source->linesize,
+                            0, source->height, dest->data, dest->linesize);
+        }
         if (err < 0) return err;
     }
     if (out->video_pts == AV_NOPTS_VALUE)
@@ -349,6 +385,14 @@ int cut_finish(CutOutput *out, int *video_error) {
     }
     *video_error = 0;
     if ((err = encode(out, out->audio, out->audio_stream, NULL, NULL)) < 0) return err;
+    if (out->tone_map) {
+        // Some decoders expose HDR signaling only after decoding the first picture.
+        AVCodecParameters *par = out->video_stream->codecpar;
+        par->color_primaries = AVCOL_PRI_BT709;
+        par->color_trc = AVCOL_TRC_BT709;
+        par->color_space = AVCOL_SPC_BT709;
+        par->color_range = AVCOL_RANGE_MPEG;
+    }
     err = av_write_trailer(out->format);
     int close = avio_closep(&out->format->pb);
     return err < 0 ? err : close;
@@ -358,6 +402,7 @@ void cut_discard(CutOutput *out) {
     if (!out) return;
     avfilter_graph_free(&out->gpu_scale);
     sws_freeContext(out->scale);
+    sws_freeContext(out->tone_map);
     swr_free(&out->resample);
     av_audio_fifo_free(out->fifo);
     av_frame_free(&out->download);

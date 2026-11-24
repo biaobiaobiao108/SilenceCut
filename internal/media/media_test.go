@@ -107,6 +107,132 @@ func TestWAVRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDetectFrameBoundaries(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate Matroska fixtures")
+	}
+	for _, tc := range []struct {
+		name, audio, filter string
+		kept                []timeline.Span
+	}{
+		{
+			name:   "two gaps in one decoded frame",
+			audio:  "aevalsrc='0.2*(lt(n,80)+between(n,960,1039)+gte(n,1920))':s=8000:d=1",
+			filter: "asetnsamples=n=4096:p=0",
+			kept:   []timeline.Span{{End: 10000}, {Start: 120000, End: 130000}, {Start: 240000, End: 1000000}},
+		},
+		{
+			name:   "missing audio between frames",
+			audio:  "sine=frequency=440:sample_rate=8000:duration=2",
+			filter: "aselect='not(between(t,0.5,1.5))'",
+			kept:   []timeline.Span{{End: 512000}, {Start: 1536000, End: 2000000}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := filepath.Join(t.TempDir(), "gaps.mkv")
+			out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", tc.audio,
+				"-af", tc.filter, "-c:a", "pcm_s16le", source).CombinedOutput()
+			if err != nil {
+				t.Fatalf("fixture: %v\n%s", err, out)
+			}
+			clips, err := Detect(context.Background(), source, timeline.Settings{Threshold: -40}, discardProgress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kept := timeline.Kept(clips); !reflect.DeepEqual(kept, tc.kept) {
+				t.Fatalf("retained %v, want %v", kept, tc.kept)
+			}
+		})
+	}
+}
+
+func TestHDRExportToneMapsPixels(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate and inspect HDR video")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe CLI is used to verify SDR metadata")
+	}
+	encoder, _ := exec.Command(ffmpeg, "-hide_banner", "-h", "encoder=libx264").Output()
+	if !bytes.Contains(encoder, []byte("yuv420p10le")) {
+		t.Skip("fixture generator needs 10-bit libx264")
+	}
+	for _, transfer := range []string{"smpte2084", "arib-std-b67"} {
+		t.Run(transfer, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, "hdr.mp4")
+			out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+				"nullsrc=s=320x240:r=12:d=1,format=yuv420p10le,geq=lum=723:cb=512:cr=512",
+				"-f", "lavfi", "-i", "sine=d=1", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
+				"-x264-params", "colorprim=bt2020:transfer="+transfer+":colormatrix=bt2020nc",
+				"-color_primaries", "bt2020",
+				"-color_trc", transfer, "-colorspace", "bt2020nc", "-color_range", "tv",
+				"-c:a", "aac", "-movflags", "+write_colr", source).CombinedOutput()
+			if err != nil {
+				t.Fatalf("fixture: %v\n%s", err, out)
+			}
+			path, err := Export(context.Background(), source, dir, "sdr", []timeline.Span{{End: 900000}}, false, discardProgress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err = exec.Command(ffprobe, "-v", "error", "-select_streams", "v:0",
+				"-show_entries", "stream=color_space,color_transfer,color_primaries", "-of", "csv=p=0", path).CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != "bt709,bt709,bt709" {
+				t.Fatalf("SDR color metadata: %v\n%s", err, out)
+			}
+			pixels, err := exec.Command(ffmpeg, "-v", "error", "-i", path, "-map", "0:v:0",
+				"-frames:v", "1", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-").Output()
+			const size = 320 * 240
+			if err != nil || len(pixels) < size {
+				t.Fatalf("decode SDR pixels: %v, %d bytes", err, len(pixels))
+			}
+			var sum int
+			for _, pixel := range pixels[:size] {
+				sum += int(pixel)
+			}
+			// A bit-depth-only conversion would leave the luma near 181.
+			if mean := sum / size; mean >= 176 && mean <= 186 {
+				t.Fatalf("luma still looks like quantized HDR: %d", mean)
+			}
+		})
+	}
+}
+
+func TestFilteredVideoPreviewExcludesRemovedAudio(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate the video fixture")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.mkv")
+	const audio = "aevalsrc='sin(2*PI*440*t)*if(between(t,0.5,1.5),0.8,0.015)':s=48000:d=2"
+	out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=2",
+		"-f", "lavfi", "-i", audio, "-c:v", "mpeg4", "-c:a", "pcm_s16le", source).CombinedOutput()
+	if err != nil {
+		t.Fatalf("fixture: %v\n%s", err, out)
+	}
+	ctx := context.Background()
+	spans := []timeline.Span{{End: 500000}, {Start: 1500000, End: 2000000}}
+	path, err := Export(ctx, source, dir, "preview", spans, true, discardProgress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, peaks, err := Waveform(ctx, path, discardProgress)
+	if err != nil || !info.Video || math.Abs(float64(info.Duration-timeline.Second)) > 25000 {
+		t.Fatalf("preview metadata %+v: %v", info, err)
+	}
+	var amplitude int
+	for _, peak := range peaks {
+		amplitude = max(amplitude, -int(peak.Min), int(peak.Max))
+	}
+	if amplitude < 200 || amplitude > 1600 {
+		t.Fatalf("preview should contain only the quiet retained tones, got peak %d", amplitude)
+	}
+}
+
 func TestVideoCut(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {

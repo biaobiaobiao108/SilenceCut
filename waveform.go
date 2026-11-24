@@ -88,7 +88,15 @@ func clipAt(clips []timeline.Clip, at int64) int {
 func (a *app) stopPlayback() {
 	if a.player != nil {
 		a.player.Pause()
-		a.wasPlaying = false
+	}
+	a.wasPlaying, a.previewPlay = false, false
+	if a.buildingCut {
+		a.previewCancel()
+		a.previewCancel, a.buildingCut = nil, false
+	}
+	if a.videoCut != nil {
+		a.closePreview()
+		a.openPreview(a.selected, false)
 	}
 }
 
@@ -124,7 +132,9 @@ func (a *app) timeline(c *ui.Context) {
 		ui.Row(c).AlignItems(ui.Center).Gap(8).Shrink(0).Children(func() {
 			ui.Toolbar(c.Key("tools"), func() {
 				icon, label := iconPlay, "播放"
-				if a.player != nil && a.player.Playing() {
+				if a.buildingCut || a.previewPlay {
+					icon, label = iconStop, "取消准备试听"
+				} else if a.player != nil && a.player.Playing() {
 					icon, label = iconPause, "暂停"
 				}
 				flatAction(c.Key("play"), label, playable, a.togglePlay).
@@ -178,7 +188,7 @@ func (a *app) timeline(c *ui.Context) {
 						c.Invalidate()
 					}
 				}
-				if !ready {
+				if !ready || a.buildingCut {
 					ui.Column(c.Key("video-feedback")).Absolute().Left(0).Top(0).Right(0).Bottom(0).Center().Children(func() {
 						a.previewFeedback(c, item)
 					})

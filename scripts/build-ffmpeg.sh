@@ -70,7 +70,7 @@ fi
   --enable-demuxer=mov,matroska,avi,mpegps,mpegts,flv,asf,mp3,wav,flac,ogg,aac,aiff,caf,ac3 \
   --enable-decoder='h264,hevc,av1,vp8,vp9,mpeg4,mpeg1video,mpeg2video,mjpeg,prores,dnxhd,ffv1,flv,wmv1,wmv2,wmv3,vc1,theora,rawvideo,png,aac,aac_latm,mp3,flac,opus,vorbis,alac,ac3,eac3,wmav1,wmav2,wmapro,wavpack,adpcm_*,pcm_*' \
   --enable-parser=h264,hevc,av1,vp8,vp9,mpeg4video,mpegvideo,mjpeg,aac,aac_latm,mpegaudio,flac,opus,vorbis,ac3,vc1 \
-  --enable-filter="silencedetect,aresample,aformat,$hw_scale" \
+  --enable-filter="aresample,aformat,$hw_scale" \
   --enable-muxer=mp4,wav --enable-encoder="$encoder,aac,pcm_s24le" \
   --enable-bsf=aac_adtstoasc,av1_frame_merge,extract_extradata $platform_flags
 make -j "${SILENCECUT_JOBS:-8}"

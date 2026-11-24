@@ -247,25 +247,31 @@ func (a *app) previewFeedback(c *ui.Context, item *asset) {
 
 func (a *app) previewTick(c *ui.Context) {
 	if a.video != nil {
+		var issue string
 		if err := a.video.Err(); err != nil {
-			item := a.selected
-			a.closePreview()
-			if item.proxy == "" {
-				a.makePreview(item)
-			} else {
-				a.previewIssue = err.Error()
-			}
+			issue = err.Error()
 		} else if !a.video.Ready() {
 			if time.Since(a.previewSince) > 5*time.Second {
-				item := a.selected
+				issue = "视频预览超时"
+			} else {
+				c.After(100 * time.Millisecond)
+			}
+		} else if a.previewPlay {
+			a.previewPlay = false
+			a.startPlayback()
+		}
+		if issue != "" {
+			if a.videoCut != nil {
+				a.filteredVideoFailed(issue)
+			} else {
+				item, resume := a.selected, a.previewPlay
 				a.closePreview()
 				if item.proxy == "" {
 					a.makePreview(item)
+					a.previewPlay = resume
 				} else {
-					a.previewIssue = "视频预览超时"
+					a.previewIssue = issue
 				}
-			} else {
-				c.After(100 * time.Millisecond)
 			}
 		}
 	}

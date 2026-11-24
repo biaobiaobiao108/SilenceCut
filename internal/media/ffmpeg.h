@@ -15,7 +15,7 @@ typedef struct {
 } CutInfo;
 
 typedef struct {
-    int64_t pts, silence_start, silence_end;
+    int64_t pts;
     int samples, video_error, seek_error;
     const float *audio;
 } CutFrame;
@@ -23,7 +23,6 @@ typedef struct {
 CutInput *cut_open(const char *path, int mode, CutInfo *info, int *err);
 void cut_close(CutInput *in);
 int cut_skip_gap(CutInput *in, int64_t after, int64_t before, int initial);
-int cut_detect(CutInput *in, double level);
 int cut_next(CutInput *in, CutFrame *frame);
 int cut_hold_video(CutInput *in);
 void cut_error(int code, char *buf, int size);

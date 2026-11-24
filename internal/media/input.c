@@ -1,17 +1,11 @@
 #include "ffmpeg.h"
 
 #include <errno.h>
-#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <libavcodec/avcodec.h>
-#include <libavfilter/avfilter.h>
-#include <libavfilter/buffersink.h>
-#include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
-#include <libavutil/eval.h>
 #include <libavutil/hwcontext.h>
-#include <libavutil/opt.h>
 #include <libswresample/swresample.h>
 #include "input.h"
 
@@ -73,8 +67,7 @@ CutInput *cut_open(const char *path, int mode, CutInfo *info, int *err) {
     in->decoded = av_frame_alloc();
     in->audio = av_frame_alloc();
     in->last_video = av_frame_alloc();
-    in->filtered = av_frame_alloc();
-    if (!in->packet || !in->decoded || !in->audio || !in->last_video || !in->filtered) {
+    if (!in->packet || !in->decoded || !in->audio || !in->last_video) {
         *err = AVERROR(ENOMEM);
         goto fail;
     }
@@ -141,11 +134,9 @@ fail:
 
 void cut_close(CutInput *in) {
     if (!in) return;
-    avfilter_graph_free(&in->graph);
     swr_free(&in->convert);
     av_channel_layout_uninit(&in->layout);
     av_channel_layout_uninit(&in->source_layout);
-    av_frame_free(&in->filtered);
     av_frame_free(&in->last_video);
     av_frame_free(&in->audio);
     av_frame_free(&in->decoded);
@@ -197,33 +188,6 @@ void cut_error(int code, char *buf, int size) {
     av_strerror(code, buf, size);
 }
 
-int cut_detect(CutInput *in, double level) {
-    char layout[128], settings[320];
-    int err = av_channel_layout_describe(&in->layout, layout, sizeof(layout));
-    if (err < 0) return err;
-    if (err >= sizeof(layout)) return AVERROR(EINVAL);
-    in->graph = avfilter_graph_alloc();
-    if (!in->graph) return AVERROR(ENOMEM);
-    in->graph->nb_threads = 1;
-    snprintf(settings, sizeof(settings), "time_base=1/1000000:sample_rate=%d:sample_fmt=flt:channel_layout=%s", in->rate, layout);
-    err = avfilter_graph_create_filter(&in->filter_input, avfilter_get_by_name("abuffer"), "source", settings, NULL, in->graph);
-    if (err < 0) return err;
-    AVFilterContext *detect;
-    // An amplitude ratio avoids locale-dependent formatting of a dB option.
-    detect = avfilter_graph_alloc_filter(in->graph, avfilter_get_by_name("silencedetect"), "detect");
-    if (!detect) return AVERROR(ENOMEM);
-    err = av_opt_set_double(detect, "noise", pow(10, level / 20), AV_OPT_SEARCH_CHILDREN);
-    if (err < 0) return err;
-    err = avfilter_init_str(detect, "d=0.1");
-    if (err < 0) return err;
-    err = avfilter_graph_create_filter(&in->filter_output, avfilter_get_by_name("abuffersink"), "sink", NULL, NULL, in->graph);
-    if (err < 0) return err;
-    if ((err = avfilter_link(in->filter_input, 0, detect, 0)) < 0 ||
-        (err = avfilter_link(detect, 0, in->filter_output, 0)) < 0)
-        return err;
-    return avfilter_graph_config(in->graph, NULL);
-}
-
 static int decode_next(CutInput *in, CutFrame *frame) {
     av_frame_unref(in->decoded);
     for (;;) {
@@ -269,12 +233,6 @@ static int decode_next(CutInput *in, CutFrame *frame) {
     }
 }
 
-static int64_t silence_time(AVFrame *frame, const char *name) {
-    const AVDictionaryEntry *entry = av_dict_get(frame->metadata, name, NULL, 0);
-    if (!entry) return INT64_MIN;
-    return llround(av_strtod(entry->value, NULL) * AV_TIME_BASE);
-}
-
 static int convert_audio(CutInput *in, CutFrame *frame) {
     AVFrame *decoded = in->decoded, *audio = in->audio;
     int err;
@@ -304,15 +262,6 @@ static int convert_audio(CutInput *in, CutFrame *frame) {
     if (err < 0) return err;
     frame->audio = (const float *)audio->data[0];
     frame->samples = audio->nb_samples = err;
-    if (in->graph && err > 0) {
-        err = av_buffersrc_add_frame_flags(in->filter_input, audio, AV_BUFFERSRC_FLAG_KEEP_REF);
-        if (err < 0) return err;
-        av_frame_unref(in->filtered);
-        err = av_buffersink_get_frame(in->filter_output, in->filtered);
-        if (err < 0) return err;
-        frame->silence_start = silence_time(in->filtered, "lavfi.silence_start");
-        frame->silence_end = silence_time(in->filtered, "lavfi.silence_end");
-    }
     return 1;
 }
 
@@ -327,7 +276,6 @@ int cut_next(CutInput *in, CutFrame *frame) {
         return AVERROR_INVALIDDATA;
     }
     frame->pts = pts == AV_NOPTS_VALUE ? in->next_pts[which - 1] : av_rescale_q(pts, base, AV_TIME_BASE_Q) - in->origin;
-    frame->silence_start = frame->silence_end = INT64_MIN;
     if (which == 2) {
         in->next_pts[1] = frame->pts + av_rescale_q(in->decoded->duration, base, AV_TIME_BASE_Q);
         return 2;

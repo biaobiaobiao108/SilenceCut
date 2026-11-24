@@ -353,10 +353,14 @@ func TestPlayheadAndBoundaryGestures(t *testing.T) {
 		t.Fatal("Escape committed a boundary edit or changed the selection")
 	}
 
-	a.video = &ui.VideoPlayer{}
-	if err := view.Click("播放"); err != nil || !p.Playing() || a.position != 15*second {
-		t.Fatalf("filtered playback did not skip the removed interval: %v, %d", err, a.position)
+	item.info.Video = true
+	a.videoCut = &filteredVideo{spans: timeline.Kept(item.history.Clips)}
+	view.Frame()
+	if err := view.Click("播放"); err != nil || !p.Playing() || a.position != 15*second ||
+		p.seeks[len(p.seeks)-1] != 10*second {
+		t.Fatalf("filtered playback did not map the cut: %v, cursor %d, seeks %v", err, a.position, p.seeks)
 	}
+	a.videoCut = nil
 	a.stopPlayback()
 	a.seek(12 * second)
 	view.Frame()

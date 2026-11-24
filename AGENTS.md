@@ -19,3 +19,4 @@
 - 本地验证时将 `CGO_CFLAGS` 和 `CGO_LDFLAGS` 指向 SDK 的 `include` 和 `lib`。Windows 还需将 SDK 的 `bin` 加入 `PATH`，并为 Go 测试和静态检查加上 `-tags mygo_nowebview`。macOS 使用默认构建标签。
 - Go 改动用 `gofmt` 格式化，并运行 `go test ./...` 和 `go vet ./...`。视频集成测试使用本机 `ffmpeg` 生成测试素材，使用 `ffprobe` 独立验证导出结果。验证硬件路径时，可设置 `SILENCECUT_FFMPEG_DEBUG=1` 查看后端日志。
 - `dist/` 和 `.ffmpeg/` 是生成产物。提交源码、测试、构建脚本和必要补丁。
+- 每次修改完成并验证后，使用中文提交信息创建 Git 提交。

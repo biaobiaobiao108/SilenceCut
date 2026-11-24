@@ -91,6 +91,7 @@ type asset struct {
 	analyzing  bool
 	issue      string
 	proxy      string
+	cutPreview *filteredVideo
 }
 
 type player interface {
@@ -124,6 +125,8 @@ type app struct {
 	video                          *ui.VideoPlayer
 	previewIssue                   string
 	previewSince                   time.Time
+	videoCut                       *filteredVideo
+	buildingCut, previewPlay       bool
 	wasPlaying                     bool
 	position                       int64
 	selection                      timeline.Span
@@ -277,6 +280,9 @@ func (a *app) removeSelected() {
 	} else {
 		a.selectAsset(a.assets[min(index, len(a.assets)-1)])
 	}
+	if selected.cutPreview != nil {
+		_ = os.Remove(selected.cutPreview.path)
+	}
 	a.status = ""
 }
 
@@ -396,6 +402,10 @@ func (a *app) filter(items []*asset) {
 				item.filtered, item.analyzing, item.issue = clips, false, ""
 				if reload {
 					item.proxy = ""
+					if item.cutPreview != nil {
+						_ = os.Remove(item.cutPreview.path)
+						item.cutPreview = nil
+					}
 				}
 				if item == a.selected {
 					a.selection = timeline.Span{}
@@ -567,7 +577,8 @@ func (a *app) closePreview() {
 		a.player.Close()
 	}
 	a.player, a.video, a.previewIssue = nil, nil, ""
-	a.wasPlaying = false
+	a.videoCut = nil
+	a.buildingCut, a.previewPlay, a.wasPlaying = false, false, false
 }
 
 func (a *app) openPreview(item *asset, proxy bool) {
@@ -576,14 +587,12 @@ func (a *app) openPreview(item *asset, proxy bool) {
 		path, proxy = item.proxy, true
 	}
 	if item.info.Video {
-		p, err := video.Open(path)
-		if err == nil {
-			p.Pause()
-			a.player, a.video, a.previewSince = p, p, time.Now()
-			p.Seek(time.Duration(a.position) * time.Microsecond)
+		if err := a.openVideo(path); err == nil {
+			a.seek(a.position)
 			return
+		} else {
+			a.previewIssue = err.Error()
 		}
-		a.previewIssue = err.Error()
 	} else {
 		p, err := openAudioPreview(path, nil)
 		if err == nil {
@@ -595,7 +604,19 @@ func (a *app) openPreview(item *asset, proxy bool) {
 	}
 	if !proxy {
 		a.makePreview(item)
+	} else {
+		a.previewPlay = false
 	}
+}
+
+func (a *app) openVideo(path string) error {
+	p, err := video.Open(path)
+	if err != nil {
+		return err
+	}
+	p.Pause()
+	a.player, a.video, a.previewSince = p, p, time.Now()
+	return nil
 }
 
 func (a *app) makePreview(item *asset) {
@@ -608,7 +629,7 @@ func (a *app) makePreview(item *asset) {
 		path, err := media.Export(ctx, source, dir, "preview", []timeline.Span{span}, true, func(float64) {})
 		a.win.Update(func() {
 			if a.closing || seq != a.previewSeq {
-				if path != "" {
+				if err == nil {
 					_ = os.Remove(path)
 				}
 				return
@@ -616,6 +637,7 @@ func (a *app) makePreview(item *asset) {
 			cancel()
 			a.previewCancel = nil
 			if err != nil {
+				a.previewPlay = false
 				a.previewIssue = err.Error()
 				return
 			}
@@ -630,13 +652,24 @@ func (a *app) seek(position int64) {
 		return
 	}
 	a.position = max(0, min(position, a.selected.info.Duration))
+	position = a.position
+	if a.videoCut != nil {
+		position = a.videoCut.editedPosition(position)
+	}
 	if a.player != nil {
-		a.player.Seek(time.Duration(a.position) * time.Microsecond)
+		a.player.Seek(time.Duration(position) * time.Microsecond)
 	}
 }
 
 func (a *app) togglePlay() {
-	if a.player == nil || a.busy() || a.waveDrag.kind != waveIdle || a.video != nil && !a.video.Ready() {
+	if a.busy() || a.waveDrag.kind != waveIdle {
+		return
+	}
+	if a.buildingCut || a.previewPlay {
+		a.stopPlayback()
+		return
+	}
+	if a.player == nil || a.video != nil && !a.video.Ready() {
 		return
 	}
 	if a.player.Playing() {
@@ -657,9 +690,19 @@ func (a *app) togglePlay() {
 	} else if a.position >= a.selected.info.Duration {
 		a.position = 0
 	}
-	if a.video == nil && !a.prepareAudioPlayback(clips) {
+	if a.selected.info.Video {
+		if !a.originalPreview && a.videoCut == nil &&
+			(len(clips) != 1 || clips[0].Span != (timeline.Span{End: a.selected.info.Duration})) {
+			a.prepareFilteredVideo(timeline.Kept(clips))
+			return
+		}
+	} else if !a.prepareAudioPlayback(clips) {
 		return
 	}
+	a.startPlayback()
+}
+
+func (a *app) startPlayback() {
 	a.seek(a.position)
 	a.followPlayhead()
 	a.player.Play()
@@ -689,10 +732,14 @@ func (a *app) prepareAudioPlayback(clips []timeline.Clip) bool {
 }
 
 func (a *app) setPreviewMode(original bool) {
-	playing := a.player != nil && a.player.Playing()
+	playing := a.buildingCut || a.previewPlay || a.player != nil && a.player.Playing()
 	a.stopPlayback()
 	a.originalPreview = original
 	if playing {
+		if original && a.selected.info.Video && (a.video == nil || !a.video.Ready()) {
+			a.previewPlay = a.previewCancel != nil || a.video != nil
+			return
+		}
 		if _, ok := nextRetained(a.selected.history.Clips, a.position); original || ok {
 			a.togglePlay()
 		}
@@ -700,8 +747,8 @@ func (a *app) setPreviewMode(original bool) {
 }
 
 func (a *app) previewPlayable(kept int64) bool {
-	return !a.busy() && a.player != nil && (a.video == nil || a.video.Ready()) &&
-		(a.originalPreview || kept > 0)
+	return !a.busy() && (a.buildingCut || a.previewPlay ||
+		a.player != nil && (a.video == nil || a.video.Ready()) && (a.originalPreview || kept > 0))
 }
 
 func nextRetained(clips []timeline.Clip, at int64) (int64, bool) {
@@ -723,22 +770,11 @@ func (a *app) updatePlaybackPosition() bool {
 	if !playing && !a.wasPlaying {
 		return false
 	}
-	a.position = max(0, min(a.player.Position().Microseconds(), a.selected.info.Duration))
-	if playing && !a.originalPreview && a.video != nil {
-		if target, ok := nextRetained(a.selected.history.Clips, a.position); ok {
-			if target != a.position {
-				a.seek(target)
-			}
-		} else {
-			a.player.Pause()
-			clips := a.selected.history.Clips
-			last := clipAt(clips, a.position) - 1
-			if last >= 0 && clips[last].Keep {
-				a.seek(clips[last].End)
-			}
-			playing = false
-		}
+	position := a.player.Position().Microseconds()
+	if a.videoCut != nil {
+		position = a.videoCut.sourcePosition(position)
 	}
+	a.position = max(0, min(position, a.selected.info.Duration))
 	if !a.overviewDrag.active {
 		a.followPlayhead()
 	}
