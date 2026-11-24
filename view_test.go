@@ -162,6 +162,10 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 	for _, size := range [][2]int{{930, 690}, {1120, 790}, {1180, 790}, {1600, 900}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			a := &app{opts: filterOptions{preset: "慢"}}
+			applied, err := a.opts.settings(0)
+			if err != nil {
+				t.Fatal(err)
+			}
 			view := ui.NewTester(a.view, size[0], size[1])
 			if !view.HasText("拖入音视频") {
 				t.Fatal("empty workspace lacks its drop target")
@@ -175,7 +179,7 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 			item := &asset{
 				path: "超长的测试素材名称用于检查列表行是否在窄窗口中正确省略.wav",
 				name: "超长的测试素材名称用于检查列表行是否在窄窗口中正确省略.wav",
-				info: media.Info{Duration: 5 * timeline.Second, Rate: 48000, Channels: 1},
+				info: media.Info{Duration: 5 * timeline.Second, Rate: 48000, Channels: 1}, settings: applied,
 				history: timeline.History{Clips: []timeline.Clip{
 					{Span: timeline.Span{Start: 0, End: 3 * timeline.Second}, Keep: true},
 					{Span: timeline.Span{Start: 3 * timeline.Second, End: 5 * timeline.Second}, Keep: false},
@@ -195,7 +199,7 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 			if size[0] < wideWorkspace {
 				settings = "过滤设置"
 			}
-			for _, label := range []string{"打开项目", "保存项目", "导出切片", "导出合并媒体", settings, "音频波形和播放位置", "移除", "撤销"} {
+			for _, label := range []string{"打开项目", "保存项目", "导出合并媒体", settings, "音频波形和播放位置", "移除", "撤销"} {
 				r, ok := view.Find(label)
 				if !ok || r.X < 0 || r.Y < 0 || r.W <= 0 || r.H <= 0 ||
 					r.X+r.W > float32(size[0]) || r.Y+r.H > float32(size[1]) {
@@ -230,15 +234,18 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 				t.Fatal(err)
 			}
 			view.Advance(revealDuration + 20*time.Millisecond)
-			for _, label := range []string{"静音阈值 (dB)", "片段后留白 (秒)", "重新过滤", "试听模式", "放大波形"} {
+			for _, label := range []string{"静音阈值 (dB)", "片段后留白 (秒)", "应用设置", "试听模式", "放大波形"} {
 				r, ok := view.Find(label)
 				if !ok || r.W <= 0 || r.H <= 0 || r.X+r.W > float32(size[0]) || r.Y+r.H > float32(size[1]) {
 					t.Fatalf("control %q is not visible at 200%% DPI: %+v", label, r)
 				}
 			}
+			if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
+				saveView(t, view, filepath.Join(folder, fmt.Sprintf("pending-%d.png", size[0])))
+			}
 			if size[0] < wideWorkspace {
 				view.Key(0, ui.KeyEscape)
-				if _, open := view.Find("重新过滤"); open || !view.Focused("过滤设置") {
+				if _, open := view.Find("应用设置"); open || !view.Focused("过滤设置") {
 					t.Fatal("closing settings must return focus to the trigger")
 				}
 			}
@@ -279,7 +286,7 @@ func TestTopbarClearsNativeWindowControls(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			view.SetTitleBar(tc.bar)
 			view.Frame()
-			for _, label := range []string{"打开项目", "保存项目", "导出切片", "导出合并媒体"} {
+			for _, label := range []string{"打开项目", "保存项目", "导出合并媒体"} {
 				r, ok := view.Find(label)
 				if !ok || r.W <= 0 || r.H <= 0 {
 					t.Fatalf("%s is not visible: %+v", label, r)
@@ -311,7 +318,7 @@ func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
 			t.Fatalf("%s is not fully inside the editor column: %+v", label, r)
 		}
 	}
-	for _, label := range []string{"导出切片", "导出合并媒体"} {
+	for _, label := range []string{"导出合并媒体"} {
 		r, ok := view.Find(label)
 		if !ok || r.X+r.W > width-settingsWidth-1 {
 			t.Fatalf("%s crosses the inspector divider: %+v", label, r)
@@ -319,47 +326,46 @@ func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
 	}
 }
 
-func TestFocusModeGivesTheWaveformRoom(t *testing.T) {
-	item := &asset{name: "口播.wav", info: media.Info{Duration: 5 * timeline.Second}}
+func TestEmptyTopbarOmitsAppName(t *testing.T) {
+	a := &app{opts: filterOptions{preset: "慢"}}
+	view := ui.NewTester(a.view, 1180, 790)
+	for _, removed := range []string{title, "专注模式", "导出切片"} {
+		if view.HasText(removed) {
+			t.Fatalf("removed topbar item %q is still visible", removed)
+		}
+	}
+}
+
+func TestInspectorPendingActionKeepsLayout(t *testing.T) {
+	settings, err := (filterOptions{preset: "慢"}).settings(-40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := &asset{
+		name: "口播.wav", info: media.Info{Duration: 5 * timeline.Second}, automatic: -40, settings: settings,
+		history: timeline.History{Clips: []timeline.Clip{{Span: timeline.Span{End: 5 * timeline.Second}, Keep: true}}},
+	}
 	a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"}}
 	view := ui.NewTester(a.view, 1180, 790)
-	wave, _ := view.Find("音频波形和播放位置")
-	if err := view.Click("专注模式"); err != nil {
+	before, ok := view.Find("重新过滤")
+	if !ok {
+		t.Fatal("rerun action is missing")
+	}
+	if err := view.Click("快"); err != nil {
 		t.Fatal(err)
 	}
-	view.Advance(revealDuration + 20*time.Millisecond)
-	focused, _ := view.Find("音频波形和播放位置")
-	if focused.W <= wave.W+400 {
-		t.Fatalf("focus mode did not widen the waveform: before %.1f after %.1f", wave.W, focused.W)
+	after, ok := view.Find("应用设置")
+	if !ok {
+		t.Fatal("pending settings must be reflected by the action")
 	}
-	if view.HasText("素材") {
-		t.Fatal("material rail remained visible in focus mode")
+	if before != after {
+		t.Fatalf("pending state moved the action: before %+v after %+v", before, after)
 	}
-	if view.HasText("仅修剪首尾") {
-		t.Fatal("filter inspector remained visible in focus mode")
+	if view.HasText("设置待应用") {
+		t.Fatal("pending state must not insert a separate layout row")
 	}
-	if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
-		saveView(t, view, filepath.Join(folder, "focus-1180.png"))
-	}
-	if err := view.Click("专注模式"); err != nil {
-		t.Fatal(err)
-	}
-	view.Advance(revealDuration + 20*time.Millisecond)
-	restored, _ := view.Find("音频波形和播放位置")
-	if math.Abs(float64(restored.W-wave.W)) > 2 {
-		t.Fatalf("waveform did not return after focus mode: before %.1f after %.1f", wave.W, restored.W)
-	}
-
-	reduced := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"}}
-	reducedView := ui.NewTesterWith(reduced.view, 1180, 790, ui.TesterOptions{Preferences: ui.Preferences{ReduceMotion: true}})
-	before, _ := reducedView.Find("音频波形和播放位置")
-	if err := reducedView.Click("专注模式"); err != nil {
-		t.Fatal(err)
-	}
-	reducedView.Frame()
-	after, _ := reducedView.Find("音频波形和播放位置")
-	if after.W <= before.W+400 || reducedView.HasText("素材") {
-		t.Fatalf("reduced motion blocked focus mode: before %.1f after %.1f", before.W, after.W)
+	if view.HasText("切片仅导出保留段") {
+		t.Fatal("clip export option must stay removed")
 	}
 }
 
@@ -576,18 +582,18 @@ func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
 		}
 	}
 	click("过滤设置")
-	click("重新过滤")
+	click("应用设置")
 	if !view.HasText("请输入 0 到 10 秒") || view.HasText("请输入 −70 到 20 dB") {
 		t.Fatal("expected only the invalid field's message")
 	}
 	selection := a.selection
 	view.SetSize(wideWorkspace, 690)
-	if _, ok := view.Find("重新过滤"); !ok || a.settingsOpen || a.opts.before != "错" ||
+	if _, ok := view.Find("应用设置"); !ok || a.settingsOpen || a.opts.before != "错" ||
 		a.position != 700_000 || a.selection != selection || a.viewLength != 2*timeline.Second {
 		t.Fatal("crossing the breakpoint changed the draft or editor state")
 	}
 	view.SetSize(wideWorkspace-1, 690)
-	if _, ok := view.Find("重新过滤"); ok {
+	if _, ok := view.Find("应用设置"); ok {
 		t.Fatal("settings rail was still present below the persistent breakpoint")
 	}
 	a.opts.before = "0.2"
@@ -603,12 +609,12 @@ func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
 	}
 }
 
-func TestFocusModeShowsInvalidImportSettings(t *testing.T) {
-	a := &app{focusMode: true, opts: filterOptions{preset: "自定义", before: "0.10", after: "0.10"}}
+func TestInvalidImportSettingsOpensInspector(t *testing.T) {
+	a := &app{opts: filterOptions{preset: "自定义", before: "0.10", after: "0.10"}}
 	view := ui.NewTester(a.view, 1180, 790)
 	a.add([]string{"sample.wav"})
 	view.Frame()
-	if a.focusMode || len(a.assets) != 0 || !view.HasText("请输入 −70 到 20 dB") ||
+	if len(a.assets) != 0 || !view.HasText("请输入 −70 到 20 dB") ||
 		!view.HasText("请修正过滤设置 · 请输入 −70 到 20 dB") {
 		t.Fatal("invalid settings must be visible after a rejected import")
 	}

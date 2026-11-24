@@ -117,12 +117,10 @@ func (a *app) view(c *ui.Context) {
 
 func (a *app) workspace(c *ui.Context, narrow, dragging bool) {
 	ui.Row(c.Key("workspace-body")).Grow(1).MinHeight(0).AlignItems(ui.Stretch).Children(func() {
-		if !a.focusMode {
-			a.library(c, dragging)
-			ui.Divider(c)
-		}
+		a.library(c, dragging)
+		ui.Divider(c)
 		a.editor(c, dragging)
-		if !narrow && !a.focusMode {
+		if !narrow {
 			ui.Divider(c)
 			panel := ui.Column(c.Key("settings")).Shrink(0).MinHeight(0).Width(settingsWidth)
 			if !c.Preferences().ReduceMotion {
@@ -141,13 +139,17 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 		ui.Row(c.Key("topbar-project")).Width(sideWidth).Shrink(0).Height(topBarHeight).
 			Padding(0, railInset, 0, float32(workspaceInset)+bar.Left).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Image(c, appIcon).Size(22, 22).Shrink(0)
-			ui.Text(c, a.projectName()).FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
+			if name := a.projectName(); name != "" {
+				ui.Text(c, name).FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
+			} else {
+				ui.Spacer(c).Grow(1)
+			}
 			if a.projectDirty {
 				ui.Text(c, "未保存").FontSize(11).TextColor(subtle).Shrink(0)
 			}
 		})
 		right := float32(workspaceInset) + bar.Right
-		if !narrow && !a.focusMode {
+		if !narrow {
 			right = railInset
 		}
 		ui.Row(c.Key("topbar-command")).Grow(1).MinWidth(0).Height(topBarHeight).
@@ -159,7 +161,7 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 					false, func() { a.chooseSaveProject(nil) })
 			})
 			ui.Spacer(c)
-			if narrow && !a.focusMode {
+			if narrow {
 				button := iconButton(c.Key("settings-button"), iconSliders, "过滤设置", true, a.settingsOpen,
 					func() { a.settingsOpen = !a.settingsOpen }).AccessSelected(a.settingsOpen)
 				if a.settingsOpen {
@@ -178,22 +180,10 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 					button.Focus()
 				}
 			}
-			focusButton := iconButton(c.Key("focus-mode"), iconFocus, "专注模式", true, a.focusMode, func() {
-				a.focusMode = !a.focusMode
-				a.focusAt = c.Now()
-				if a.focusMode {
-					a.settingsOpen = false
-				}
-			}).AccessSelected(a.focusMode)
-			if a.focusMode {
-				focusButton.Background(raised)
-			}
-			textAction(c.Key("export-clips"), "导出切片", !a.busy() && a.canExport(true), func() { a.chooseExport(true) }).
-				Description("将素材的各段导出为独立文件")
-			primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(false), func() { a.chooseExport(false) }).
+			primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(), a.chooseExport).
 				Label("导出合并媒体").Description("每个素材导出一个文件，只拼接保留片段")
 		})
-		if !narrow && !a.focusMode {
+		if !narrow {
 			ui.Box(c.Key("topbar-inspector")).Width(settingsWidth + 1).Shrink(0)
 		}
 	})
@@ -206,7 +196,7 @@ func (a *app) projectName() string {
 	if len(a.assets) > 0 {
 		return "未命名项目"
 	}
-	return title
+	return ""
 }
 
 func (a *app) dropOverlay(c *ui.Context) {
@@ -304,9 +294,6 @@ func (a *app) editor(c *ui.Context, dragging bool) {
 	item := a.selected
 	editor := ui.Column(c.Key("editor")).Grow(1).MinWidth(0).MinHeight(0).Background(worktop).
 		Padding(topBarHeight+4, workspaceInset, 16, workspaceInset).Gap(sectionGap)
-	if !c.Preferences().ReduceMotion && !a.focusAt.IsZero() && c.Now().Sub(a.focusAt) < revealDuration+50*time.Millisecond {
-		editor.Transition(ui.ElementTransition{Duration: revealDuration, Width: true, Position: true})
-	}
 	editor.Children(func() {
 		a.activity(c)
 		if item == nil {
@@ -433,18 +420,20 @@ func (a *app) controls(c *ui.Context, panel ui.Element, width, top float32) {
 			settingValue(c, "前 / 后留白", fmt.Sprintf("%d / %d 毫秒", settings.Before/1000, settings.After/1000))
 		}
 		ui.Divider(c)
+		pending := false
 		if item != nil && len(item.history.Clips) > 0 && !busy {
 			settings, err := a.opts.settings(item.automatic)
-			if err != nil || settings != item.settings {
-				ui.Text(c, "设置待应用").FontSize(12).TextColor(accent)
-			}
+			pending = err != nil || settings != item.settings
+		}
+		rerunLabel := "重新过滤"
+		if pending {
+			rerunLabel = "应用设置"
 		}
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			textAction(c.Key("rerun"), "重新过滤", enabled, func() { a.requestFilter([]*asset{item}) }).
+			textAction(c.Key("rerun"), rerunLabel, enabled, func() { a.requestFilter([]*asset{item}) }).
 				TextColor(actionColor(enabled, true))
 			textAction(c.Key("rerun-all"), "应用到全部", len(a.assets) > 1 && !busy, func() { a.requestFilter(a.assets) })
 		})
-		ui.Checkbox(c.Key("kept-only"), &a.onlyKept, "切片仅导出保留段").Disabled(busy).OnChange(a.markProject)
 	})
 }
 

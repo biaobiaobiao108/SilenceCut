@@ -54,7 +54,6 @@ type projectDocument struct {
 	Before          string         `json:"before"`
 	After           string         `json:"after"`
 	Ends            bool           `json:"only_ends"`
-	OnlyKept        bool           `json:"only_kept"`
 	OriginalPreview bool           `json:"original_preview"`
 	Selected        int            `json:"selected"`
 	Position        int64          `json:"position"`
@@ -66,7 +65,7 @@ type projectDocument struct {
 func (a *app) snapshot(path string) projectDocument {
 	doc := projectDocument{
 		Version: 1, Preset: a.opts.preset, Level: a.opts.level, Before: a.opts.before, After: a.opts.after,
-		Ends: a.opts.ends, OnlyKept: a.onlyKept, OriginalPreview: a.originalPreview,
+		Ends: a.opts.ends, OriginalPreview: a.originalPreview,
 		Selected: slices.Index(a.assets, a.selected), Position: a.position, ViewStart: a.viewStart, ViewLength: a.viewLength,
 		Selection: a.selection,
 	}
@@ -416,7 +415,7 @@ func (a *app) loadProject(doc projectDocument, path string, recovered bool) {
 	a.refreshProjectTitle()
 	a.assets, a.selected = nil, nil
 	a.opts = filterOptions{preset: doc.Preset, level: doc.Level, before: doc.Before, after: doc.After, ends: doc.Ends}
-	a.onlyKept, a.originalPreview = doc.OnlyKept, doc.OriginalPreview
+	a.originalPreview = doc.OriginalPreview
 	a.selection, a.waveDrag, a.overviewDrag = timeline.Span{}, waveGesture{}, overviewGesture{}
 	for _, saved := range doc.Assets {
 		source := filepath.FromSlash(saved.Path)

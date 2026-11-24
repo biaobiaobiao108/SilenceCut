@@ -35,7 +35,7 @@ func TestProjectRoundTrip(t *testing.T) {
 	baseline := []timeline.Clip{{Span: timeline.Span{End: 6_000_003}, Keep: true}}
 	item := &asset{path: source, file: file, info: media.Info{Duration: baseline[0].End, Rate: 48000, Channels: 1},
 		filtered: baseline, history: timeline.History{Clips: baseline}}
-	a := &app{assets: []*asset{item}, selected: item, onlyKept: true,
+	a := &app{assets: []*asset{item}, selected: item,
 		opts:     filterOptions{preset: "自定义", level: "-38.5", before: "0.25", after: "0.33", ends: true},
 		position: 2_000_009, viewLength: 3_000_011, viewStart: 1_000_005,
 		selection: timeline.Span{Start: 1_000_006, End: 2_000_007}}
@@ -55,7 +55,7 @@ func TestProjectRoundTrip(t *testing.T) {
 	if saved.Path != filepath.Base(source) || saved.Source != stampOf(file) || !slices.Equal(saved.Filtered, baseline) ||
 		!slices.Equal(saved.Clips, item.history.Clips) || doc.Selected != 0 || doc.Position != a.position ||
 		doc.ViewStart != a.viewStart || doc.ViewLength != a.viewLength || doc.Selection != a.selection ||
-		!doc.OnlyKept || !doc.Ends || doc.Level != a.opts.level {
+		!doc.Ends || doc.Level != a.opts.level {
 		t.Fatalf("project round trip did not preserve the draft: %+v %+v", doc, saved)
 	}
 	doc.Assets[0].Clips[0].End--

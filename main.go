@@ -115,10 +115,9 @@ type app struct {
 	progress                       float64
 	picking, closing, canceling    bool
 	settingsOpen, validateSettings bool
-	focusMode                      bool
 	refilter                       []*asset
 	refilterCount                  int
-	onlyKept, originalPreview      bool
+	originalPreview                bool
 	player                         player
 	video                          *ui.VideoPlayer
 	previewIssue                   string
@@ -128,7 +127,6 @@ type app struct {
 	selection                      timeline.Span
 	viewStart                      int64
 	viewLength                     int64
-	focusAt                        time.Time
 	waveDrag                       waveGesture
 	overviewDrag                   overviewGesture
 	waveColumns                    []timeline.Peak
@@ -375,7 +373,6 @@ func (a *app) validSettings() bool {
 	_, err := a.opts.settings(0)
 	a.validateSettings = err != nil
 	if a.validateSettings {
-		a.focusMode = false
 		a.settingsOpen = true
 		a.status = "请修正过滤设置 · " + err.Error()
 	}
@@ -501,13 +498,13 @@ func changed(before, after os.FileInfo) bool {
 		before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime())
 }
 
-func (a *app) chooseExport(clips bool) {
+func (a *app) chooseExport() {
 	if a.busy() {
 		return
 	}
 	count := 0
 	for _, item := range a.assets {
-		if a.exportable(item, clips) {
+		if a.exportable(item) {
 			count++
 		}
 	}
@@ -517,19 +514,18 @@ func (a *app) chooseExport(clips bool) {
 	a.pick(mygo.OpenDialogOptions{
 		Parent: a.win, Title: fmt.Sprintf("为 %d 个素材选择导出文件夹", count), DefaultPath: a.outputDir,
 		Directory: true, CreateDirectories: true, ButtonLabel: fmt.Sprintf("导出 %d 个素材", count),
-	}, func(paths []string) { a.export(paths[0], clips) })
+	}, func(paths []string) { a.export(paths[0]) })
 }
 
-func (a *app) canExport(clips bool) bool {
-	return slices.ContainsFunc(a.assets, func(item *asset) bool { return a.exportable(item, clips) })
+func (a *app) canExport() bool {
+	return slices.ContainsFunc(a.assets, func(item *asset) bool { return a.exportable(item) })
 }
 
-func (a *app) exportable(item *asset, clips bool) bool {
-	return item.issue == "" && (clips && !a.onlyKept && len(item.history.Clips) > 0 ||
-		slices.ContainsFunc(item.history.Clips, func(clip timeline.Clip) bool { return clip.Keep }))
+func (a *app) exportable(item *asset) bool {
+	return item.issue == "" && slices.ContainsFunc(item.history.Clips, func(clip timeline.Clip) bool { return clip.Keep })
 }
 
-func (a *app) export(dir string, clips bool) {
+func (a *app) export(dir string) {
 	a.outputDir = dir
 	type exportWork struct {
 		item     *asset
@@ -541,12 +537,11 @@ func (a *app) export(dir string, clips bool) {
 	}
 	var work []exportWork
 	for _, item := range a.assets {
-		if a.exportable(item, clips) {
+		if a.exportable(item) {
 			item.exportIssue = ""
 			work = append(work, exportWork{item: item, snapshot: *item})
 		}
 	}
-	onlyKept := a.onlyKept
 	ctx := a.begin("导出")
 	a.async(func() {
 		report := a.report()
@@ -563,7 +558,7 @@ func (a *app) export(dir string, clips bool) {
 			}
 			if err == nil {
 				update := func(value float64) { report((float64(index) + value) / float64(len(work))) }
-				n, err = exportAsset(ctx, item.snapshot, dir, clips, onlyKept, update)
+				n, err = exportAsset(ctx, item.snapshot, dir, update)
 			}
 			count += n
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -588,63 +583,17 @@ func (a *app) export(dir string, clips bool) {
 	})
 }
 
-func exportAsset(ctx context.Context, item asset, dir string, clips, onlyKept bool, progress media.Progress) (int, error) {
+func exportAsset(ctx context.Context, item asset, dir string, progress media.Progress) (int, error) {
 	base := strings.TrimSuffix(item.name, filepath.Ext(item.name))
-	if !clips {
-		spans := timeline.Kept(item.history.Clips)
-		if len(spans) == 0 {
-			return 0, nil
-		}
-		_, err := media.Export(ctx, item.path, dir, base+"_已过滤", spans, progress)
-		if err != nil {
-			return 0, err
-		}
-		return 1, nil
-	}
-	parts := item.history.Clips
-	if onlyKept {
-		parts = slices.DeleteFunc(slices.Clone(parts), func(clip timeline.Clip) bool { return !clip.Keep })
-	}
-	if len(parts) == 0 {
+	spans := timeline.Kept(item.history.Clips)
+	if len(spans) == 0 {
 		return 0, nil
 	}
-	folder, err := clipFolder(dir, base+"_切片")
+	_, err := media.Export(ctx, item.path, dir, base+"_已过滤", spans, progress)
 	if err != nil {
 		return 0, err
 	}
-	count := 0
-	for index, part := range parts {
-		label := "移除"
-		if part.Keep {
-			label = "保留"
-		}
-		name := fmt.Sprintf("%03d_%s", index+1, label)
-		_, err := media.Export(ctx, item.path, folder, name, []timeline.Span{part.Span}, func(value float64) {
-			progress((float64(index) + value) / float64(len(parts)))
-		})
-		if err != nil {
-			if count == 0 {
-				_ = os.Remove(folder)
-			}
-			return count, err
-		}
-		count++
-	}
-	return count, nil
-}
-
-func clipFolder(dir, base string) (string, error) {
-	for n := 1; ; n++ {
-		name := base
-		if n > 1 {
-			name = fmt.Sprintf("%s (%d)", base, n)
-		}
-		path := filepath.Join(dir, name)
-		err := os.Mkdir(path, 0755)
-		if !errors.Is(err, os.ErrExist) {
-			return path, err
-		}
-	}
+	return 1, nil
 }
 
 func (a *app) closePreview() {

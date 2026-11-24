@@ -34,7 +34,6 @@ var (
 	iconOpen    = editorIcon(`<path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h3.8l2 2H18a2.5 2.5 0 0 1 2.5 2.5v1.2M4 10.7h16.7l-2.2 8H5.2z"/>`)
 	iconSave    = editorIcon(`<path d="M5 4h11l3 3v13H5zM8 4v6h8V4M8 20v-6h8v6"/>`)
 	iconSliders = editorIcon(`<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="2" fill="currentColor" stroke="none"/>`)
-	iconFocus   = editorIcon(`<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5M8 12h8"/>`)
 )
 
 func iconButton(c *ui.Context, icon *ui.SVG, label string, enabled, primary bool, action func()) ui.Element {
