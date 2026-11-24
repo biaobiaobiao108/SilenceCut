@@ -102,7 +102,7 @@ static int add_video(CutOutput *out, CutInput *in, int proxy) {
     v->bit_rate = av_clip64((int64_t)(v->width * (double)v->height * av_q2d(v->framerate) * .12), 1000000, 50000000);
     AVDictionary *opts = NULL;
 #ifdef _WIN32
-    if (in->mode >= CUT_HARDWARE) av_dict_set(&opts, "hw_encoding", "1", 0);
+    if (in->mode >= CUT_HARDWARE_ENCODER) av_dict_set(&opts, "hw_encoding", "1", 0);
 #else
     if (in->mode == CUT_SOFTWARE) {
         av_dict_set(&opts, "allow_sw", "1", 0);
@@ -132,7 +132,7 @@ static int add_video(CutOutput *out, CutInput *in, int proxy) {
     return direct ? 0 : av_frame_get_buffer(out->picture, 0);
 }
 
-CutOutput *cut_create(CutInput *in, const char *path, int proxy, int *err) {
+CutOutput *cut_create(CutInput *in, const char *path, int proxy, int *err, int *video_error) {
     CutOutput *out = av_mallocz(sizeof(*out));
     if (!out) {
         *err = AVERROR(ENOMEM);
@@ -147,7 +147,10 @@ CutOutput *cut_create(CutInput *in, const char *path, int proxy, int *err) {
     int video = in->decoder[1] != NULL;
     *err = avformat_alloc_output_context2(&out->format, NULL, video ? "mp4" : "wav", path);
     if (*err < 0) goto fail;
-    if (video && (*err = add_video(out, in, proxy)) < 0) goto fail;
+    if (video && (*err = add_video(out, in, proxy)) < 0) {
+        *video_error = CUT_VIDEO_ENCODE_ERROR;
+        goto fail;
+    }
     if ((*err = add_audio(out, in, video)) < 0) goto fail;
     if (!video) av_opt_set(out->format->priv_data, "rf64", "auto", 0);
     if ((*err = avio_open(&out->format->pb, path, AVIO_FLAG_WRITE)) < 0) goto fail;
@@ -159,7 +162,8 @@ fail:
     return NULL;
 }
 
-static int encode(CutOutput *out, AVCodecContext *codec, AVStream *stream, AVFrame *frame) {
+static int encode(CutOutput *out, AVCodecContext *codec, AVStream *stream, AVFrame *frame, int *video_error) {
+    if (video_error) *video_error = CUT_VIDEO_ENCODE_ERROR;
     int err = avcodec_send_frame(codec, frame);
     if (err < 0) return err;
     for (;;) {
@@ -169,7 +173,10 @@ static int encode(CutOutput *out, AVCodecContext *codec, AVStream *stream, AVFra
         out->packet->stream_index = stream->index;
         av_packet_rescale_ts(out->packet, codec->time_base, stream->time_base);
         err = av_interleaved_write_frame(out->format, out->packet);
-        if (err < 0) return err;
+        if (err < 0) {
+            if (video_error) *video_error = 0;
+            return err;
+        }
     }
 }
 
@@ -191,7 +198,7 @@ static int write_audio(CutOutput *out, int final) {
             int read = av_audio_fifo_read(out->fifo, (void **)frame->extended_data, frame->nb_samples);
             err = read == frame->nb_samples ? 0 : AVERROR_INVALIDDATA;
         }
-        if (err >= 0) err = encode(out, a, out->audio_stream, frame);
+        if (err >= 0) err = encode(out, a, out->audio_stream, frame, NULL);
         out->audio_pts += frame->nb_samples;
         av_frame_free(&frame);
         if (err < 0) return err;
@@ -277,7 +284,8 @@ static int init_gpu_scale(CutOutput *out, const AVFrame *source) {
     return err;
 }
 
-int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration) {
+int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *video_error) {
+    *video_error = CUT_VIDEO_ENCODE_ERROR;
     AVFrame *source = in->last_video, *dest = out->picture;
     const AVCodecContext *v = out->video;
     AVHWFramesContext *hardware = source->hw_frames_ctx ? (AVHWFramesContext *)source->hw_frames_ctx->data : NULL;
@@ -318,17 +326,17 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration) {
     }
     if (out->video_pts == AV_NOPTS_VALUE)
         av_log(out->video, AV_LOG_VERBOSE, "SilenceCut export frames: decoder=%s encoder=%s transfer=%s\n",
-               hardware ? "hardware" : "software", in->mode >= CUT_HARDWARE ? "hardware" : "platform fallback",
+               hardware ? "hardware" : "software", in->mode >= CUT_HARDWARE_ENCODER ? "hardware" : "software",
                v->pix_fmt == AV_PIX_FMT_NV12 ? (hardware ? "readback" : "system-memory") :
                (out->gpu_scale ? "device-scale" : "device-direct"));
     dest->pts = av_rescale_q(pts, AV_TIME_BASE_Q, v->time_base);
     if (out->video_pts != AV_NOPTS_VALUE && dest->pts <= out->video_pts) dest->pts = out->video_pts + 1;
     out->video_pts = dest->pts;
     dest->duration = FFMAX(1, av_rescale_q(duration, AV_TIME_BASE_Q, v->time_base));
-    return encode(out, out->video, out->video_stream, dest);
+    return encode(out, out->video, out->video_stream, dest, video_error);
 }
 
-int cut_finish(CutOutput *out) {
+int cut_finish(CutOutput *out, int *video_error) {
     int err;
     do {
         err = resample_audio(out, NULL, 0);
@@ -337,9 +345,10 @@ int cut_finish(CutOutput *out) {
     if ((err = write_audio(out, 1)) < 0) return err;
     if (out->video) {
         if (out->video_pts == AV_NOPTS_VALUE) return AVERROR_INVALIDDATA;
-        if ((err = encode(out, out->video, out->video_stream, NULL)) < 0) return err;
+        if ((err = encode(out, out->video, out->video_stream, NULL, video_error)) < 0) return err;
     }
-    if ((err = encode(out, out->audio, out->audio_stream, NULL)) < 0) return err;
+    *video_error = 0;
+    if ((err = encode(out, out->audio, out->audio_stream, NULL, NULL)) < 0) return err;
     err = av_write_trailer(out->format);
     int close = avio_closep(&out->format->pb);
     return err < 0 ? err : close;

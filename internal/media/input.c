@@ -129,6 +129,7 @@ CutInput *cut_open(const char *path, int mode, CutInfo *info, int *err) {
         if (mode != CUT_AUDIO_ONLY) {
             *err = open_decoder(video, &in->decoder[1], in, mode >= CUT_HARDWARE);
             if (*err < 0) goto fail;
+            info->hardware_decoder = in->hardware_format != AV_PIX_FMT_NONE;
         }
     }
     return in;
@@ -155,9 +156,37 @@ void cut_close(CutInput *in) {
     av_free(in);
 }
 
-void cut_seek(CutInput *in, int64_t time) {
-    if (time > 0)
-        av_seek_frame(in->format, -1, in->origin + time, AVSEEK_FLAG_BACKWARD);
+int cut_skip_gap(CutInput *in, int64_t after, int64_t before, int initial) {
+    // MOV/MP4 can reposition the other tracks to the selected video index entry.
+    // Leave room for reordered frames and audio decoder preroll.
+    const int64_t preroll = 2 * AV_TIME_BASE;
+    if (before - after <= 2 * preroll || in->video_index < 0 ||
+        !in->format->pb || !(in->format->pb->seekable & AVIO_SEEKABLE_NORMAL))
+        return 0;
+    int index = -1;
+    int64_t timestamp = in->origin + before - preroll;
+    if (strcmp(in->format->iformat->name, "mov,mp4,m4a,3gp,3g2,mj2") == 0) {
+        index = in->video_index;
+        AVStream *stream = in->format->streams[index];
+        int64_t target = av_rescale_q(timestamp, AV_TIME_BASE_Q, stream->time_base);
+        const AVIndexEntry *entry = avformat_index_get_entry_from_timestamp(stream, target, AVSEEK_FLAG_BACKWARD);
+        if (!entry || !(entry->flags & AVINDEX_KEYFRAME) ||
+            entry->timestamp <= av_rescale_q(in->origin + after + preroll, AV_TIME_BASE_Q, stream->time_base))
+            return 0;
+        timestamp = entry->timestamp;
+    } else if (!initial || before <= 5 * AV_TIME_BASE) {
+        return 0;
+    }
+    int err = av_seek_frame(in->format, index, timestamp, AVSEEK_FLAG_BACKWARD);
+    if (err < 0) return err;
+    for (int i = 0; i < 2; i++) avcodec_flush_buffers(in->decoder[i]);
+    // Discard resampler history from before the seek, along with the previous picture.
+    swr_free(&in->convert);
+    av_frame_unref(in->last_video);
+    in->active = -1;
+    in->eof = in->drain = 0;
+    in->next_pts[0] = in->next_pts[1] = AV_NOPTS_VALUE;
+    return 1;
 }
 
 void cut_error(int code, char *buf, int size) {
@@ -195,13 +224,16 @@ int cut_detect(CutInput *in, double level) {
     return avfilter_graph_config(in->graph, NULL);
 }
 
-static int decode_next(CutInput *in) {
+static int decode_next(CutInput *in, CutFrame *frame) {
     av_frame_unref(in->decoded);
     for (;;) {
         if (in->active >= 0) {
             int err = avcodec_receive_frame(in->decoder[in->active], in->decoded);
             if (err >= 0) return in->active + 1;
-            if (err != AVERROR(EAGAIN) && err != AVERROR_EOF) return err;
+            if (err != AVERROR(EAGAIN) && err != AVERROR_EOF) {
+                if (in->active == 1) frame->video_error = CUT_VIDEO_DECODE_ERROR;
+                return err;
+            }
             in->active = -1;
         }
         if (!in->eof) {
@@ -218,14 +250,20 @@ static int decode_next(CutInput *in) {
                 in->active = which;
             }
             av_packet_unref(in->packet);
-            if (err < 0) return err;
+            if (err < 0) {
+                if (which == 1) frame->video_error = CUT_VIDEO_DECODE_ERROR;
+                return err;
+            }
             continue;
         }
         if (in->drain >= 2) return 0;
         int which = in->drain++;
         if (in->decoder[which]) {
             int err = avcodec_send_packet(in->decoder[which], NULL);
-            if (err < 0 && err != AVERROR_EOF) return err;
+            if (err < 0 && err != AVERROR_EOF) {
+                if (which == 1) frame->video_error = CUT_VIDEO_DECODE_ERROR;
+                return err;
+            }
             in->active = which;
         }
     }
@@ -279,11 +317,15 @@ static int convert_audio(CutInput *in, CutFrame *frame) {
 }
 
 int cut_next(CutInput *in, CutFrame *frame) {
-    int which = decode_next(in);
+    int which = decode_next(in, frame);
     if (which <= 0) return which;
     int64_t pts = in->decoded->best_effort_timestamp;
     int index = which == 1 ? in->audio_index : in->video_index;
     AVRational base = in->format->streams[index]->time_base;
+    if (pts == AV_NOPTS_VALUE && in->next_pts[which - 1] == AV_NOPTS_VALUE) {
+        frame->seek_error = 1;
+        return AVERROR_INVALIDDATA;
+    }
     frame->pts = pts == AV_NOPTS_VALUE ? in->next_pts[which - 1] : av_rescale_q(pts, base, AV_TIME_BASE_Q) - in->origin;
     frame->silence_start = frame->silence_end = INT64_MIN;
     if (which == 2) {

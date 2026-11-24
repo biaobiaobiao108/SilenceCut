@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image/png"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,19 +48,34 @@ func (f filterOptions) settings(automatic float64) (timeline.Settings, error) {
 	case "中等":
 		s.Before, s.After = 150_000, 150_000
 	case "自定义":
-		level, le := strconv.ParseFloat(f.level, 64)
-		before, be := strconv.ParseFloat(f.before, 64)
-		after, ae := strconv.ParseFloat(f.after, 64)
-		if le != nil || math.IsNaN(level) || level < -70 || level > 20 {
-			return s, errors.New("阈值请输入 −70 到 20 dB")
+		values, issues := f.custom()
+		for _, issue := range issues {
+			if issue != "" {
+				return s, errors.New(issue)
+			}
 		}
-		if be != nil || ae != nil || math.IsNaN(before) || math.IsNaN(after) || min(before, after) < 0 || max(before, after) > 10 {
-			return s, errors.New("前后留白请输入 0 到 10 秒")
-		}
-		s.Threshold = level
-		s.Before, s.After = int64(math.Round(before*1e6)), int64(math.Round(after*1e6))
+		s.Threshold = values[0]
+		s.Before, s.After = int64(math.Round(values[1]*1e6)), int64(math.Round(values[2]*1e6))
 	}
 	return s, nil
+}
+
+func (f filterOptions) custom() (values [3]float64, issues [3]string) {
+	for i, field := range [...]struct {
+		text, issue string
+		min, max    float64
+	}{
+		{f.level, "请输入 −70 到 20 dB", -70, 20},
+		{f.before, "请输入 0 到 10 秒", 0, 10},
+		{f.after, "请输入 0 到 10 秒", 0, 10},
+	} {
+		value, err := strconv.ParseFloat(strings.TrimSpace(field.text), 64)
+		if err != nil || math.IsNaN(value) || value < field.min || value > field.max {
+			issues[i] = field.issue
+		}
+		values[i] = value
+	}
+	return
 }
 
 type asset struct {
@@ -69,6 +87,8 @@ type asset struct {
 	automatic  float64
 	settings   timeline.Settings
 	history    timeline.History
+	filtered   []timeline.Clip
+	analyzing  bool
 	issue      string
 	proxy      string
 }
@@ -83,32 +103,36 @@ type player interface {
 }
 
 type app struct {
-	win                       *mygo.Window
-	temp                      string
-	workers                   sync.WaitGroup
-	assets                    []*asset
-	selected                  *asset
-	opts                      filterOptions
-	cancel                    context.CancelFunc
-	previewCancel             context.CancelFunc
-	previewSeq                int
-	job, status, outputDir    string
-	progress                  float64
-	picking, closing          bool
-	onlyKept, originalPreview bool
-	player                    player
-	video                     *ui.VideoPlayer
-	previewIssue              string
-	previewSince              time.Time
-	wasPlaying                bool
-	position                  int64
-	selection                 timeline.Span
-	viewStart                 int64
-	viewLength                int64
-	waveDrag                  waveGesture
-	overviewDrag              overviewGesture
-	waveColumns               []timeline.Peak
-	overviewColumns           []timeline.Peak
+	win                            *mygo.Window
+	temp                           string
+	workers                        sync.WaitGroup
+	assets                         []*asset
+	selected                       *asset
+	opts                           filterOptions
+	cancel                         context.CancelFunc
+	previewCancel                  context.CancelFunc
+	previewSeq                     int
+	job, status, outputDir         string
+	publishedDir                   string
+	progress                       float64
+	picking, closing, canceling    bool
+	settingsOpen, validateSettings bool
+	refilter                       []*asset
+	refilterCount                  int
+	onlyKept, originalPreview      bool
+	player                         player
+	video                          *ui.VideoPlayer
+	previewIssue                   string
+	previewSince                   time.Time
+	wasPlaying                     bool
+	position                       int64
+	selection                      timeline.Span
+	viewStart                      int64
+	viewLength                     int64
+	waveDrag                       waveGesture
+	overviewDrag                   overviewGesture
+	waveColumns                    []timeline.Peak
+	overviewColumns                []timeline.Peak
 }
 
 func main() {
@@ -121,10 +145,19 @@ func main() {
 		opts: filterOptions{preset: "慢", level: "-40", before: "0.10", after: "0.10"},
 	}
 	mygo.App.WhenReady(func() {
+		mygo.Theme.SetSource(mygo.ThemeDark)
 		state.win = mygo.NewWindow(mygo.WindowOptions{
 			Title: title, Width: 1180, Height: 790, MinWidth: 930, MinHeight: 690,
 			Content: ui.View(state.view),
 		})
+		if runtime.GOOS == "windows" {
+			var icon bytes.Buffer
+			if err := png.Encode(&icon, appIcon.Image(128, 128, nil)); err != nil {
+				log.Print(err)
+			} else if err := state.win.SetIcon(icon.Bytes()); err != nil {
+				log.Print(err)
+			}
+		}
 		state.win.OnClose(func(*mygo.CloseEvent) {
 			state.closing = true
 			state.closePreview()
@@ -154,7 +187,7 @@ func (a *app) async(fn func()) {
 	}()
 }
 
-func (a *app) busy() bool { return a.cancel != nil || a.picking }
+func (a *app) busy() bool { return a.cancel != nil || a.picking || len(a.refilter) > 0 }
 
 func (a *app) chooseFiles() {
 	if a.busy() {
@@ -188,8 +221,7 @@ func (a *app) add(paths []string) {
 	if a.busy() || len(paths) == 0 {
 		return
 	}
-	if _, err := a.opts.settings(0); err != nil {
-		a.status = err.Error()
+	if !a.validSettings() {
 		return
 	}
 	var items []*asset
@@ -248,15 +280,26 @@ func (a *app) removeSelected() {
 	a.status = ""
 }
 
-func (a *app) begin(label string) context.Context {
+func (a *app) begin(job string) context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
-	a.cancel, a.job, a.status, a.progress = cancel, label, "", 0
+	a.cancel, a.job, a.status, a.progress = cancel, job, "", 0
+	a.canceling = false
+	a.stopPlayback()
 	return ctx
+}
+
+func (a *app) cancelJob() {
+	if a.cancel == nil || a.canceling {
+		return
+	}
+	a.canceling = true
+	a.cancel()
 }
 
 func (a *app) end(status string) {
 	a.cancel()
 	a.cancel, a.job, a.status = nil, "", status
+	a.canceling = false
 }
 
 func (a *app) report() media.Progress {
@@ -270,23 +313,40 @@ func (a *app) report() media.Progress {
 	}
 }
 
+func (a *app) validSettings() bool {
+	_, err := a.opts.settings(0)
+	a.validateSettings = err != nil
+	if a.validateSettings {
+		a.settingsOpen = true
+	}
+	return !a.validateSettings
+}
+
+func (a *app) requestFilter(items []*asset) {
+	if a.busy() || len(items) == 0 || !a.validSettings() {
+		return
+	}
+	count := 0
+	for _, item := range items {
+		if item.filtered != nil && !slices.Equal(item.filtered, item.history.Clips) {
+			count++
+		}
+	}
+	if count > 0 {
+		a.settingsOpen = false
+		a.refilter, a.refilterCount = slices.Clone(items), count
+		return
+	}
+	a.filter(items)
+}
+
 func (a *app) filter(items []*asset) {
-	if a.busy() || len(items) == 0 {
-		return
-	}
 	opts := a.opts
-	if _, err := opts.settings(0); err != nil {
-		a.status = err.Error()
-		return
-	}
-	ctx := a.begin("正在过滤")
-	if a.player != nil {
-		a.player.Pause()
-	}
+	ctx := a.begin("过滤")
 	work := make([]asset, 0, len(items))
 	for _, item := range items {
 		work = append(work, *item)
-		item.issue = ""
+		item.analyzing = true
 	}
 	a.async(func() {
 		report := a.report()
@@ -314,13 +374,16 @@ func (a *app) filter(items []*asset) {
 				current.settings, _ = opts.settings(current.automatic)
 				clips, err = media.Detect(ctx, current.path, current.settings, func(value float64) { update(.45 + value*.55) })
 			}
-			if ctx.Err() != nil {
+			if err != nil && ctx.Err() != nil {
 				break
 			}
 			update(1)
 			if err != nil {
 				failed++
-				a.win.Update(func() { item.issue = err.Error() })
+				a.win.Update(func() {
+					item.analyzing = false
+					item.issue = err.Error()
+				})
 				continue
 			}
 			succeeded++
@@ -330,6 +393,7 @@ func (a *app) filter(items []*asset) {
 				item.info, item.peaks, item.automatic = current.info, current.peaks, current.automatic
 				item.waveform = current.waveform
 				item.file, item.settings, item.history = current.file, current.settings, current.history
+				item.filtered, item.analyzing, item.issue = clips, false, ""
 				if reload {
 					item.proxy = ""
 				}
@@ -343,15 +407,29 @@ func (a *app) filter(items []*asset) {
 				}
 			})
 		}
-		status := fmt.Sprintf("已过滤 %d 个素材", succeeded)
-		if failed > 0 {
-			status += fmt.Sprintf(" · %d 个失败，详情见素材列表", failed)
-		}
-		if ctx.Err() != nil {
-			status = "已取消过滤 · " + status
-		}
-		a.win.Update(func() { a.end(status) })
+		status := batchStatus("过滤", fmt.Sprintf("已过滤 %d 个素材", succeeded), succeeded, failed, "详情见素材列表", ctx.Err() != nil)
+		a.win.Update(func() {
+			for _, item := range items {
+				item.analyzing = false
+			}
+			a.end(status)
+		})
 	})
+}
+
+func batchStatus(action, completed string, succeeded, failed int, issue string, canceled bool) string {
+	switch {
+	case canceled:
+		completed = "已取消" + action + " · " + completed
+	case failed > 0 && succeeded > 0:
+		completed = action + "部分成功 · " + completed
+	case failed > 0:
+		completed = action + "失败 · " + completed
+	}
+	if failed > 0 {
+		completed += fmt.Sprintf(" · %d 个素材失败 · %s", failed, issue)
+	}
+	return completed
 }
 
 func changed(before, after os.FileInfo) bool {
@@ -384,10 +462,7 @@ func (a *app) export(dir string, clips bool) {
 		}
 	}
 	onlyKept := a.onlyKept
-	ctx := a.begin("正在导出")
-	if a.player != nil {
-		a.player.Pause()
-	}
+	ctx := a.begin("导出")
 	a.async(func() {
 		report := a.report()
 		var count, failures int
@@ -413,14 +488,13 @@ func (a *app) export(dir string, clips bool) {
 				}
 			}
 		}
-		status := fmt.Sprintf("已导出 %d 个文件", count)
-		if failures > 0 {
-			status += fmt.Sprintf(" · %d 个素材失败 · %s", failures, firstIssue)
-		}
-		if ctx.Err() != nil {
-			status = "已取消导出 · " + status
-		}
-		a.win.Update(func() { a.end(status) })
+		status := batchStatus("导出", fmt.Sprintf("已导出 %d 个文件", count), count, failures, firstIssue, ctx.Err() != nil)
+		a.win.Update(func() {
+			if count > 0 {
+				a.publishedDir = dir
+			}
+			a.end(status)
+		})
 	})
 }
 
@@ -562,7 +636,7 @@ func (a *app) seek(position int64) {
 }
 
 func (a *app) togglePlay() {
-	if a.player == nil || a.busy() || a.video != nil && !a.video.Ready() {
+	if a.player == nil || a.busy() || a.waveDrag.kind != waveIdle || a.video != nil && !a.video.Ready() {
 		return
 	}
 	if a.player.Playing() {

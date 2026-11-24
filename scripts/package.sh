@@ -18,6 +18,13 @@ case "$(uname -s)" in
     sdk="$work/mingw32-x86_64"
     bundle="$dest/SilenceCut-windows-x64"
     mkdir -p "$bundle/Notices/FFmpeg"
+    resource="$root/appicon_windows_amd64.syso"
+    if [ -e "$resource" ]; then echo "Icon resource already exists: $resource" >&2; exit 1; fi
+    icon_work=$(mktemp -d "$dest/.app-icon.XXXXXX")
+    trap 'rm -f "$resource" "$icon_work/SilenceCut.ico" "$icon_work/icon.rc"; rmdir "$icon_work"' EXIT
+    go run ./scripts/make-icon.go assets/silencecut.svg "$icon_work/SilenceCut.ico"
+    printf '1 ICON "%s"\n' "$(cygpath -m "$icon_work/SilenceCut.ico")" > "$icon_work/icon.rc"
+    windres -F pe-x86-64 -i "$icon_work/icon.rc" -o "$resource"
     export GOOS=windows GOARCH=amd64
     sdk_native=$(cygpath -m "$sdk")
     export CGO_CFLAGS="'-I$sdk_native/include'"
@@ -40,6 +47,7 @@ case "$(uname -s)" in
     app="$dest/SilenceCut.app"
     contents="$app/Contents"
     mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Resources/Notices/FFmpeg"
+    go run ./scripts/make-icon.go assets/silencecut.svg "$contents/Resources/AppIcon.icns"
     sdk="$work/darwin-arm64"
     export GOOS=darwin GOARCH=arm64 MACOSX_DEPLOYMENT_TARGET=14.0 CC="clang -arch arm64"
     export CGO_CFLAGS="'-I$sdk/include'"
@@ -65,6 +73,7 @@ case "$(uname -s)" in
   <key>CFBundleExecutable</key><string>SilenceCut</string>
   <key>CFBundleIdentifier</key><string>app.silencecut.desktop</string>
   <key>CFBundleName</key><string>极速过滤</string>
+  <key>CFBundleIconFile</key><string>AppIcon.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0.0</string>
   <key>CFBundleVersion</key><string>1</string>

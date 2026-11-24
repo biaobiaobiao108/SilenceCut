@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"silencecut/internal/timeline"
 )
@@ -199,5 +200,75 @@ func TestH264ExportAndScaledPreview(t *testing.T) {
 				t.Fatalf("decoding video: %v %s", err, out)
 			}
 		})
+	}
+}
+
+func TestIndexedExportMatchesSequential(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg CLI is used to generate and compare the test fixture")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe CLI is used to check the output timestamps")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "indexed.mp4")
+	out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=19:size=640x360:rate=24",
+		"-f", "lavfi", "-i", "aevalsrc=0.3*sin(2*PI*(300*t+11*t*t)):s=48000:d=19",
+		"-c:v", "libx264", "-preset", "fast", "-g", "24", "-bf", "2", "-c:a", "aac", source).CombinedOutput()
+	if strings.Contains(string(out), "Unknown encoder") {
+		t.Skip("fixture generator needs libx264")
+	}
+	if err != nil {
+		t.Fatalf("creating indexed fixture: %v %s", err, out)
+	}
+	spans := []timeline.Span{{Start: 5142000, End: 5763000}, {Start: 16473000, End: 17461000}}
+	var results []string
+	for _, skipGaps := range []bool{true, false} {
+		last := -1.0
+		started := time.Now()
+		path, err := export(context.Background(), source, dir, "cut", spans, false, false, skipGaps, func(value float64) {
+			if value < last {
+				t.Errorf("progress decreased: %f to %f", last, value)
+			}
+			last = value
+		})
+		if err != nil || last != 1 {
+			t.Fatalf("export (skip=%t): %v, progress %f", skipGaps, err, last)
+		}
+		t.Logf("export (skip=%t): %s", skipGaps, time.Since(started).Round(time.Millisecond))
+		results = append(results, path)
+	}
+
+	read := func(binary string, args ...string) []byte {
+		t.Helper()
+		out, err := exec.Command(binary, args...).Output()
+		if err != nil {
+			t.Fatalf("checking export with %s: %v", binary, err)
+		}
+		return out
+	}
+	packetTimes := func(path string) []byte {
+		return read(ffprobe, "-v", "error", "-show_entries", "packet=stream_index,pts,duration", "-of", "csv=p=0", path)
+	}
+	if !bytes.Equal(packetTimes(results[0]), packetTimes(results[1])) {
+		t.Error("seeking changed audio or video packet timestamps")
+	}
+	pcm := func(path string) []byte {
+		return read(ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", "-f", "s16le", "-")
+	}
+	if !bytes.Equal(pcm(results[0]), pcm(results[1])) {
+		t.Error("seeking changed decoded audio samples")
+	}
+	comparison, err := exec.Command(ffmpeg, "-hide_banner", "-nostats", "-i", results[0], "-i", results[1],
+		"-lavfi", "ssim", "-an", "-f", "null", "-").CombinedOutput()
+	_, raw, found := strings.Cut(string(comparison), "All:")
+	if err != nil || !found {
+		t.Fatalf("comparing decoded video: %v %s", err, comparison)
+	}
+	score, err := strconv.ParseFloat(strings.Fields(raw)[0], 64)
+	if err != nil || score < .995 {
+		t.Fatalf("seeking changed decoded video: SSIM %f (%v)", score, err)
 	}
 }

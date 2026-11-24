@@ -7,7 +7,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -171,7 +173,11 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 			item.waveform = timeline.BuildWaveform(item.peaks)
 			a.assets, a.selected = []*asset{item}, item
 			view.Frame()
-			for _, label := range []string{"导出切片", "导出合并媒体", "重新过滤", "音频波形和播放位置", "移除", "撤销"} {
+			settings := "重新过滤"
+			if size[0] < wideWorkspace {
+				settings = "过滤设置"
+			}
+			for _, label := range []string{"导出切片", "导出合并媒体", settings, "音频波形和播放位置", "移除", "撤销"} {
 				r, ok := view.Find(label)
 				if !ok || r.X < 0 || r.Y < 0 || r.W <= 0 || r.H <= 0 ||
 					r.X+r.W > float32(size[0]) || r.Y+r.H > float32(size[1]) {
@@ -202,13 +208,26 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 				t.Fatalf("undo: %v, %+v", err, item.history)
 			}
 			view.SetScale(2)
+			if size[0] < wideWorkspace {
+				if err := view.Click("过滤设置"); err != nil {
+					t.Fatal(err)
+				}
+				view.Advance(revealDuration + 20*time.Millisecond)
+			}
 			if err := view.Click("自定义"); err != nil {
 				t.Fatal(err)
 			}
+			view.Advance(revealDuration + 20*time.Millisecond)
 			for _, label := range []string{"静音阈值 (dB)", "片段后留白 (秒)", "重新过滤", "试听模式", "放大波形"} {
 				r, ok := view.Find(label)
 				if !ok || r.W <= 0 || r.H <= 0 || r.X+r.W > float32(size[0]) || r.Y+r.H > float32(size[1]) {
 					t.Fatalf("control %q is not visible at 200%% DPI: %+v", label, r)
+				}
+			}
+			if size[0] < wideWorkspace {
+				view.Key(0, ui.KeyEscape)
+				if _, open := view.Find("重新过滤"); open || !view.Focused("过滤设置") {
+					t.Fatal("closing settings must return focus to the trigger")
 				}
 			}
 			if err := view.Click("原始"); err != nil || !a.originalPreview {
@@ -218,5 +237,202 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 				t.Fatalf("filtered view action: %v", err)
 			}
 		})
+	}
+}
+
+type dragPreview struct {
+	playing bool
+	seeks   []int64
+}
+
+func (p *dragPreview) Playing() bool { return p.playing }
+func (p *dragPreview) Play()         { p.playing = true }
+func (p *dragPreview) Pause()        { p.playing = false }
+func (p *dragPreview) Close()        {}
+func (p *dragPreview) Position() time.Duration {
+	return time.Duration(p.seeks[len(p.seeks)-1]) * time.Microsecond
+}
+func (p *dragPreview) Seek(at time.Duration) { p.seeks = append(p.seeks, at.Microseconds()) }
+
+func TestPlayheadAndBoundaryGestures(t *testing.T) {
+	const second = timeline.Second
+	item := &asset{info: media.Info{Duration: 30 * second}, history: timeline.History{Clips: []timeline.Clip{
+		{Span: timeline.Span{Start: 0, End: 10 * second}, Keep: true},
+		{Span: timeline.Span{Start: 10 * second, End: 15 * second}},
+		{Span: timeline.Span{Start: 15 * second, End: 30 * second}, Keep: true},
+	}}}
+	p := &dragPreview{seeks: []int64{10 * second}}
+	selection := timeline.Span{Start: 7 * second, End: 8 * second}
+	a := &app{selected: item, player: p, position: 10 * second, selection: selection, viewStart: 5 * second, viewLength: 15 * second}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	x := func(s float32) float32 { return wave.X + wave.W*(s-5)/15 }
+	near := func(at, expected int64) bool { return at >= expected-2 && at <= expected+2 }
+	body, ruler, handle := wave.Y+wave.H/2, wave.Y+3, wave.Y+rulerHeight+4
+	view.Move(x(10)+5, body)
+	if view.Cursor() != ui.CursorGrab {
+		t.Fatalf("line cursor = %v", view.Cursor())
+	}
+	view.Move(x(10), handle)
+	if view.Cursor() != ui.CursorResizeEW {
+		t.Fatalf("overlapping boundary cursor = %v", view.Cursor())
+	}
+	view.Move(x(10)+3, ruler)
+	if view.Cursor() != ui.CursorGrab {
+		t.Fatalf("ruler handle cursor = %v", view.Cursor())
+	}
+	p.Play()
+	view.Press(x(10)+3, ruler)
+	if p.Playing() || a.position != 10*second || a.selection != selection || a.waveDrag.kind != wavePlayhead {
+		t.Fatalf("press moved the playhead, lost selection or failed to pause: %+v", a.waveDrag)
+	}
+	view.Move(x(11)+3, handle)
+	view.Move(x(12)+3, body)
+	if len(p.seeks) != 2 || !near(a.position, 12*second) {
+		t.Fatalf("move was not immediate or preview was not throttled: position=%d seeks=%v", a.position, p.seeks)
+	}
+	view.Advance(33 * time.Millisecond)
+	view.Move(x(13)+3, body)
+	if len(p.seeks) != 3 {
+		t.Fatalf("preview did not seek after 33 ms: %v", p.seeks)
+	}
+	view.Release(x(14)+3, body)
+	if !near(a.position, 14*second) || p.seeks[len(p.seeks)-1] != a.position || p.Playing() || a.selection != selection || item.history.CanUndo() {
+		t.Fatalf("playhead release: position=%d seeks=%v selection=%v", a.position, p.seeks, a.selection)
+	}
+	view.Press(x(14), body)
+	view.Move(wave.X-20, wave.Y-40)
+	if a.position != 5*second {
+		t.Fatalf("left clamp = %d", a.position)
+	}
+	view.Move(wave.X+wave.W+20, wave.Y-40)
+	if a.position != 20*second {
+		t.Fatalf("right clamp = %d", a.position)
+	}
+	view.Key(0, ui.KeyEscape)
+	view.Move(x(17), body)
+	view.Release(x(17), body)
+	if !near(a.position, 14*second) || a.selection != selection || p.seeks[len(p.seeks)-1] != a.position {
+		t.Fatalf("Escape did not restore playhead: position=%d selection=%v", a.position, a.selection)
+	}
+	view.Press(x(14), body)
+	view.Release(wave.X+wave.W+20, body)
+	if a.position != 20*second || p.seeks[len(p.seeks)-1] != a.position {
+		t.Fatalf("release outside: position=%d seeks=%v", a.position, p.seeks)
+	}
+	view.ClickAt(x(10), body)
+	view.Press(x(10), handle)
+	view.Move(x(11), handle)
+	if item.history.CanUndo() || !near(a.waveDrag.end, 11*second) {
+		t.Fatal("boundary move must preview without editing")
+	}
+	view.Release(x(12), handle)
+	if !near(item.history.Clips[0].End, 12*second) {
+		t.Fatalf("boundary release = %d", item.history.Clips[0].End)
+	}
+	a.history(false)
+	if item.history.Clips[0].End != 10*second || item.history.CanUndo() {
+		t.Fatal("boundary release must create one undo step")
+	}
+	a.selection = selection
+	view.Press(x(16), body)
+	view.Move(x(17), body)
+	if !near(a.selection.Start, 16*second) || !near(a.selection.End, 17*second) {
+		t.Fatalf("blank area did not select: %v", a.selection)
+	}
+	view.Key(0, ui.KeyEscape)
+	view.Release(x(17), body)
+	if a.selection != selection || !near(a.position, 12*second) {
+		t.Fatal("Escape did not restore the prior selection and position")
+	}
+	view.Press(x(10), handle)
+	view.Move(x(11), handle)
+	view.Key(0, ui.KeyEscape)
+	view.Release(x(11), handle)
+	if item.history.CanUndo() || item.history.Clips[0].End != 10*second || a.selection != selection {
+		t.Fatal("Escape committed a boundary edit or changed the selection")
+	}
+
+	a.video = &ui.VideoPlayer{}
+	if err := view.Click("播放"); err != nil || !p.Playing() || a.position != 15*second {
+		t.Fatalf("filtered playback did not skip the removed interval: %v, %d", err, a.position)
+	}
+	a.stopPlayback()
+	a.seek(12 * second)
+	view.Frame()
+	if err := view.Click("原始"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.Click("播放"); err != nil || !p.Playing() || a.position != 12*second {
+		t.Fatalf("original playback did not start within the removed interval: %v, %d", err, a.position)
+	}
+}
+
+func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
+	clips := []timeline.Clip{{Span: timeline.Span{End: 5 * timeline.Second}, Keep: true}}
+	first := &asset{name: "第一段.wav", path: "first", info: media.Info{Duration: 5 * timeline.Second}, filtered: clips,
+		history: timeline.History{Clips: clips}}
+	second := &asset{name: "第二段.wav", path: "second", filtered: clips, history: timeline.History{Clips: clips}}
+	a := &app{assets: []*asset{first, second}, selected: first, position: 700_000, viewLength: 2 * timeline.Second,
+		selection: timeline.Span{Start: 1, End: 900_000}, opts: filterOptions{preset: "自定义", level: "-40", before: "错", after: "0.1"}}
+	view := ui.NewTesterWith(a.view, 930, 690, ui.TesterOptions{Preferences: ui.Preferences{ReduceMotion: true}})
+	click := func(label string) {
+		t.Helper()
+		if err := view.Click(label); err != nil {
+			t.Fatal(err)
+		}
+	}
+	click("过滤设置")
+	click("重新过滤")
+	if !view.HasText("请输入 0 到 10 秒") || view.HasText("请输入 −70 到 20 dB") {
+		t.Fatal("expected only the invalid field's message")
+	}
+	selection := a.selection
+	view.SetSize(1080, 690)
+	if _, ok := view.Find("重新过滤"); !ok || a.settingsOpen || a.opts.before != "错" ||
+		a.position != 700_000 || a.selection != selection || a.viewLength != 2*timeline.Second {
+		t.Fatal("crossing the breakpoint changed the draft or editor state")
+	}
+	view.SetSize(1079, 690)
+	if _, ok := view.Find("重新过滤"); ok {
+		t.Fatal("settings rail was still present below 1080 DIP")
+	}
+	a.opts.before = "0.2"
+	first.history.Edit(timeline.Span{End: timeline.Second}, false)
+	click("过滤设置")
+	click("应用到全部")
+	if !view.HasText("重新过滤会覆盖 1 个素材的手工编辑。") || len(a.refilter) != 2 {
+		t.Fatalf("incorrect scope for confirmation: %d affected, %d requested", a.refilterCount, len(a.refilter))
+	}
+	view.Key(0, ui.KeyEscape)
+	if len(a.refilter) != 0 || slices.Equal(first.history.Clips, clips) || !slices.Equal(second.history.Clips, clips) {
+		t.Fatal("dismissing confirmation did not preserve edits")
+	}
+}
+
+func TestBatchStatusAndPublishedFolder(t *testing.T) {
+	a := &app{outputDir: t.TempDir()}
+	view := ui.NewTester(a.view, 1180, 790)
+	if view.HasText("打开导出文件夹") {
+		t.Fatal("choosing a folder must not count as writing files")
+	}
+	ctx := a.begin("导出")
+	view.Frame()
+	if !view.HasText("正在导出") {
+		t.Fatal("missing running export status")
+	}
+	if err := view.Click("取消"); err != nil || ctx.Err() != context.Canceled || !view.HasText("正在取消导出") {
+		t.Fatalf("missing canceling status: %v, %v", err, ctx.Err())
+	}
+	a.end(batchStatus("导出", "已导出 0 个文件", 0, 2, "文件丢失", false))
+	view.Frame()
+	if !view.HasText("导出失败 · 已导出 0 个文件 · 2 个素材失败 · 文件丢失") || view.HasText("打开导出文件夹") {
+		t.Fatal("failed export did not show the failure or exposed the folder prematurely")
+	}
+	a.publishedDir = a.outputDir
+	a.status = batchStatus("导出", "已导出 1 个文件", 1, 1, "文件丢失", false)
+	view.Frame()
+	if !view.HasText("导出部分成功 · 已导出 1 个文件 · 1 个素材失败 · 文件丢失") || !view.HasText("打开导出文件夹") {
+		t.Fatal("partial export did not expose the result status and folder")
 	}
 }

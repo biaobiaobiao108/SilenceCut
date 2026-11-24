@@ -23,17 +23,20 @@ import (
 )
 
 type Info struct {
-	Duration       int64
-	Rate, Channels int
-	Video          bool
-	Width, Height  int
+	Duration        int64
+	Rate, Channels  int
+	Video           bool
+	Width, Height   int
+	hardwareDecoder bool
 }
 
 type Progress func(float64)
 
+var ffmpegDebug = os.Getenv("SILENCECUT_FFMPEG_DEBUG") == "1"
+
 func init() {
 	level := C.int(C.AV_LOG_ERROR)
-	if os.Getenv("SILENCECUT_FFMPEG_DEBUG") == "1" {
+	if ffmpegDebug {
 		level = C.AV_LOG_VERBOSE
 	}
 	C.av_log_set_level(level)
@@ -64,6 +67,7 @@ func open(path string, mode C.int) (*C.CutInput, Info, error) {
 	info := Info{
 		Duration: int64(metadata.duration), Rate: int(metadata.rate), Channels: int(metadata.channels),
 		Video: metadata.video != 0, Width: int(metadata.width), Height: int(metadata.height),
+		hardwareDecoder: metadata.hardware_decoder != 0,
 	}
 	if info.Channels > 64 {
 		C.cut_close(input)
@@ -184,7 +188,10 @@ func frames(ctx context.Context, in *C.CutInput, process func(C.int, *C.CutFrame
 		kind := C.cut_next(in, &frame)
 		switch {
 		case kind < 0:
-			return avError("解码失败", kind)
+			if frame.seek_error != 0 {
+				return errGapSeek
+			}
+			return pipelineError("解码失败", kind, frame.video_error)
 		case kind == 0:
 			return nil
 		}
@@ -203,6 +210,26 @@ func Extension(info Info) string {
 
 // Export writes to a temporary file in the destination directory and publishes only a closed muxer.
 func Export(ctx context.Context, source, dir, base string, spans []timeline.Span, proxy bool, progress Progress) (string, error) {
+	software := os.Getenv("SILENCECUT_VIDEO_ACCELERATION") == "software"
+	return export(ctx, source, dir, base, spans, proxy, software, true, progress)
+}
+
+type videoPipelineError struct {
+	error
+	decode bool
+}
+
+func pipelineError(action string, code, video C.int) error {
+	err := avError(action, code)
+	if video != 0 {
+		return videoPipelineError{err, video == C.CUT_VIDEO_DECODE_ERROR}
+	}
+	return err
+}
+
+var errGapSeek = errors.New("定位后无法恢复完整的音视频区间")
+
+func export(ctx context.Context, source, dir, base string, spans []timeline.Span, proxy, software, skipGaps bool, progress Progress) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -212,6 +239,9 @@ func Export(ctx context.Context, source, dir, base string, spans []timeline.Span
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	mode := C.int(C.CUT_DIRECT)
+	if software {
+		mode = C.CUT_SOFTWARE
+	}
 	in, info, err := open(source, mode)
 	if err != nil {
 		return "", err
@@ -244,8 +274,19 @@ func Export(ctx context.Context, source, dir, base string, spans []timeline.Span
 	if err := temp.Close(); err != nil {
 		return "", err
 	}
+	reported := -1.0
+	report := func(value float64) {
+		if value > reported {
+			reported = value
+			progress(value)
+		}
+	}
 	for {
-		err = encode(ctx, in, info, path, proxy, audioRanges, videoRanges, progress)
+		if mode >= C.CUT_HARDWARE && !info.hardwareDecoder {
+			// The current attempt already uses software decoding and hardware encoding.
+			mode = C.CUT_HARDWARE_ENCODER
+		}
+		err = encode(ctx, in, info, path, proxy, skipGaps, audioRanges, videoRanges, report)
 		C.cut_close(in)
 		in = nil
 		if err == nil {
@@ -254,16 +295,28 @@ func Export(ctx context.Context, source, dir, base string, spans []timeline.Span
 		if canceled := ctx.Err(); canceled != nil {
 			return "", canceled
 		}
-		if !info.Video || mode == C.CUT_SOFTWARE {
-			return "", err
+		if errors.Is(err, errGapSeek) {
+			skipGaps = false
+		} else {
+			var videoError videoPipelineError
+			if !info.Video || mode == C.CUT_SOFTWARE || !errors.As(err, &videoError) {
+				return "", err
+			}
+			if videoError.decode && mode >= C.CUT_HARDWARE {
+				mode = C.CUT_HARDWARE_ENCODER
+			} else {
+				mode--
+			}
 		}
-		// A driver can reject a frame after opening the codecs. Re-decode from
-		// the source and replace the temporary output before publishing.
-		mode--
-		in, _, err = open(source, mode)
+		if ffmpegDebug {
+			fmt.Fprintf(os.Stderr, "SilenceCut export retry: mode=%d indexed-seek=%t cause=%v\n", mode, skipGaps, err)
+		}
+		var retryInfo Info
+		in, retryInfo, err = open(source, mode)
 		if err != nil {
 			return "", err
 		}
+		info.hardwareDecoder = retryInfo.hardwareDecoder
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -285,32 +338,56 @@ type outputSpan struct {
 	start, end, output, length int64
 }
 
-func encode(ctx context.Context, in *C.CutInput, info Info, path string, proxy bool, audioRanges, videoRanges []outputSpan, progress Progress) error {
+func encode(ctx context.Context, in *C.CutInput, info Info, path string, proxy, skipGaps bool, audioRanges, videoRanges []outputSpan, progress Progress) error {
 	name := C.CString(path)
 	defer C.free(unsafe.Pointer(name))
-	var code, proxyFlag C.int
+	var code, proxyFlag, videoError C.int
 	if proxy {
 		proxyFlag = 1
 	}
-	out := C.cut_create(in, name, proxyFlag, &code)
+	out := C.cut_create(in, name, proxyFlag, &code, &videoError)
 	if out == nil {
-		return avError("无法创建导出文件", code)
+		return pipelineError("无法创建导出文件", code, videoError)
 	}
 	defer C.cut_discard(out)
 	first, last := videoRanges[0].start, videoRanges[len(videoRanges)-1].end
-	if first > 5*timeline.Second {
-		C.cut_seek(in, C.int64_t(first-2*timeline.Second))
-	}
 	audio, video := audioWriter{out: out, ranges: audioRanges, channels: info.Channels}, 0
 	var pictureTime int64
 	var hasPicture bool
+	var jumps, decodedVideo int
+	var checkAudio, checkVideo bool
+	lastChecked := -1
+	trySkip := func(after int64) error {
+		if !skipGaps || !info.Video || audio.index != video || video >= len(videoRanges) ||
+			video == lastChecked || audio.written != 0 || checkAudio || checkVideo {
+			return nil
+		}
+		lastChecked = video
+		next := videoRanges[video].start
+		var initial C.int
+		if video == 0 {
+			initial = 1
+		}
+		code := C.cut_skip_gap(in, C.int64_t(after), C.int64_t(next), initial)
+		if code < 0 {
+			return fmt.Errorf("%w（%v）", errGapSeek, avError("素材定位失败", code))
+		}
+		if code > 0 {
+			jumps++
+			checkAudio, checkVideo, hasPicture = true, true, false
+		}
+		return nil
+	}
+	if err := trySkip(0); err != nil {
+		return err
+	}
 	draw := func(end int64) error {
 		for video < len(videoRanges) && videoRanges[video].start < end {
 			span := videoRanges[video]
 			start, stop := max(pictureTime, span.start), min(end, span.end)
 			if stop > start {
-				if code := C.cut_video(out, in, C.int64_t(span.output+start-span.start), C.int64_t(stop-start)); code < 0 {
-					return avError("视频编码失败", code)
+				if code := C.cut_video(out, in, C.int64_t(span.output+start-span.start), C.int64_t(stop-start), &videoError); code < 0 {
+					return pipelineError("视频编码失败", code, videoError)
 				}
 			}
 			if end < span.end {
@@ -320,14 +397,30 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, proxy b
 		}
 		return nil
 	}
+	started := time.Now()
 	reportAt := time.Time{}
+	var scannedThrough int64
 	err := frames(ctx, in, func(kind C.int, frame *C.CutFrame) (bool, error) {
 		pts := int64(frame.pts)
+		scannedThrough = max(scannedThrough, pts)
 		if kind == 1 {
+			if checkAudio && frame.samples > 0 {
+				if sampleIndex(pts, info.Rate) > audioRanges[lastChecked].start {
+					return false, errGapSeek
+				}
+				checkAudio = false
+			}
 			if err := audio.write(sampleIndex(pts, info.Rate), frame); err != nil {
 				return false, err
 			}
 		} else {
+			decodedVideo++
+			if checkVideo {
+				if pts > videoRanges[lastChecked].start {
+					return false, errGapSeek
+				}
+				checkVideo = false
+			}
 			if hasPicture {
 				if pts <= pictureTime {
 					return false, nil
@@ -342,17 +435,27 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, proxy b
 			if hasPicture {
 				pictureTime = pts
 			} else {
-				pictureTime, hasPicture = min(pts, first), true
+				pictureTime, hasPicture = min(pts, videoRanges[video].start), true
 			}
 		}
+		if err := trySkip(scannedThrough); err != nil {
+			return false, err
+		}
 		if time.Since(reportAt) > 75*time.Millisecond {
-			progress(fraction(pts-first, last-first))
+			progress(min(.99, fraction(pts-first, last-first)))
 			reportAt = time.Now()
 		}
 		return audio.index == len(audioRanges) && (!info.Video || video == len(videoRanges)), nil
 	})
 	if err != nil {
+		var videoError videoPipelineError
+		if errors.As(err, &videoError) && (checkAudio || checkVideo) {
+			return fmt.Errorf("%w（%v）", errGapSeek, err)
+		}
 		return err
+	}
+	if checkAudio || checkVideo {
+		return errGapSeek
 	}
 	if info.Video {
 		if !hasPicture {
@@ -370,8 +473,13 @@ func encode(ctx context.Context, in *C.CutInput, info Info, path string, proxy b
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if code := C.cut_finish(out); code < 0 {
-		return avError("无法写入导出文件", code)
+	videoError = 0
+	if code := C.cut_finish(out, &videoError); code < 0 {
+		return pipelineError("无法写入导出文件", code, videoError)
+	}
+	if ffmpegDebug && info.Video {
+		fmt.Fprintf(os.Stderr, "SilenceCut export complete: seeks=%d decoded-video-frames=%d elapsed=%s\n",
+			jumps, decodedVideo, time.Since(started).Round(time.Millisecond))
 	}
 	progress(1)
 	return nil

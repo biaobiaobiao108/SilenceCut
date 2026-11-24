@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -14,85 +15,71 @@ import (
 )
 
 const (
-	paneGap       = 12
-	paneRadius    = 8
-	paneInset     = 12
-	sideWidth     = 208
-	settingsWidth = 238
+	workspaceInset = 18
+	railInset      = 14
+	sideWidth      = 172
+	settingsWidth  = 228
+	sectionGap     = 12
+	controlHeight  = 34
+	controlRadius  = 5
+	headerHeight   = 54
+	wideWorkspace  = 1080
+	hoverDuration  = 110 * time.Millisecond
+	switchDuration = 140 * time.Millisecond
+	revealDuration = 180 * time.Millisecond
 )
 
 var (
-	worktop       = ui.Hex("#EEF1F3")
-	sheet         = ui.Hex("#FFFFFF")
-	border        = ui.Hex("#D8DFE3")
-	ink           = ui.Hex("#1B2933")
-	muted         = ui.Hex("#52616C")
-	accent        = ui.Hex("#125A65")
-	accentHover   = ui.Hex("#0F4C56")
-	accentPressed = ui.Hex("#0D3F48")
-	accentPale    = ui.Hex("#E0EEF0")
-	screen        = ui.Hex("#19252F")
-	screenText    = ui.Hex("#EAF0F3")
-	waveBack      = ui.Hex("#F2F5F6")
-	waveKeep      = ui.Hex("#DBEAE4")
-	waveRemove    = ui.Hex("#F5E2DE")
-	waveSelection = ui.Hex("#375866")
+	worktop       = ui.Hex("#17191B")
+	rail          = ui.Hex("#1D2022")
+	border        = ui.Hex("#34383B")
+	ink           = ui.Hex("#EFEEE9")
+	muted         = ui.Hex("#ABB0B4")
+	disabledInk   = ui.Hex("#73787C")
+	accent        = ui.Hex("#F3BD66")
+	accentHover   = ui.Hex("#F9CB80")
+	accentPressed = ui.Hex("#DEA653")
+	hoverFace     = ui.Hex("#2A2E30")
+	pressedFace   = ui.Hex("#363B3D")
+	screen        = ui.Hex("#111315")
+	waveBack      = ui.Hex("#202426")
+	waveKeep      = ui.Hex("#24332F")
+	waveRemove    = ui.Hex("#352729")
+	waveSelection = ui.Hex("#D4DDD8")
 )
 
 var appTheme = func() *ui.Theme {
-	theme := ui.LightTheme()
+	theme := ui.DarkTheme()
 	theme.Background = worktop
-	theme.Surface, theme.SurfaceHover, theme.SurfacePressed = sheet, waveBack, accentPale
+	theme.Surface, theme.SurfaceHover, theme.SurfacePressed = rail, hoverFace, pressedFace
 	theme.Border, theme.Text, theme.TextMuted = border, ink, muted
 	theme.Accent, theme.AccentHover, theme.AccentPressed = accent, accentHover, accentPressed
+	theme.AccentText = worktop
 	theme.InactiveAccent, theme.Focus, theme.Danger = accent, accent, waveRemovedInk
-	theme.Radius = 6
+	theme.Radius = controlRadius
 	return theme
 }()
 
 func (a *app) view(c *ui.Context) {
 	c.SetTheme(appTheme)
+	width, _ := c.Size()
+	narrow := width < wideWorkspace
+	if !narrow {
+		a.settingsOpen = false
+	}
+	if a.waveDrag.kind > waveIdle && a.waveDrag.kind < waveCanceled && c.Shortcut(0, ui.KeyEscape) {
+		a.cancelWave()
+	}
 	a.previewTick(c)
 	c.OnWindowShortcut(0, ui.KeySpace, a.togglePlay)
 	mod := ui.Cmd
 	c.OnWindowShortcut(mod, ui.KeyO, a.chooseFiles)
 	c.OnWindowShortcut(mod, ui.KeyZ, func() { a.history(false) })
 	c.OnWindowShortcut(mod|ui.Shift, ui.KeyZ, func() { a.history(true) })
-	ui.Column(c).Fill().Padding(14).Gap(paneGap).Background(worktop).Children(func() {
-		a.toolbar(c)
-		ui.Row(c).Grow(1).MinHeight(0).Gap(paneGap).AlignItems(ui.Stretch).Children(func() {
-			a.library(c)
-			a.preview(c)
-			a.controls(c)
-		})
-		a.timeline(c)
-		a.footer(c)
-	})
-}
-
-func (a *app) toolbar(c *ui.Context) {
-	ui.Row(c).Gap(8).Height(38).AlignItems(ui.Center).Children(func() {
-		ui.Icon(c, iconSplit).Size(22, 22).TextColor(accent)
-		ui.Text(c, title).FontSize(19).Bold()
-		ui.Spacer(c)
-		ui.Button(c.Key("export-clips"), "导出切片").Disabled(a.busy() || !a.canExport(true)).
-			Tooltip("将素材的各段导出为独立文件").OnClick(func() { a.chooseExport(true) })
-		ui.PrimaryButton(c.Key("export-media"), "导出合并媒体").Disabled(a.busy() || !a.canExport(false)).
-			Tooltip("每个素材导出一个文件，只拼接保留片段").OnClick(func() { a.chooseExport(false) })
-	})
-}
-
-func pane(e ui.Element) ui.Element {
-	return e.Background(sheet).Border(1, border).Radius(paneRadius).Padding(paneInset)
-}
-
-func (a *app) library(c *ui.Context) {
-	panel := pane(ui.Column(c.Key("library"))).Width(sideWidth).Shrink(0).Gap(10)
+	root := ui.Column(c.Key("workspace")).Fill().Background(worktop)
 	drop := transfer.DropOptions{Formats: []transfer.Format{transfer.FileList, transfer.URIList}, Operations: transfer.Copy}
-	if _, over := ui.DataDragOver(panel, drop); over && !a.busy() {
-		panel.Background(accentPale).Border(1, accent)
-	}
-	if event, ok := ui.DropData(panel, drop); ok && !a.busy() {
+	_, dragging := ui.DataDragOver(root, drop)
+	if event, ok := ui.DropData(root, drop); ok && !a.busy() {
 		files, err := event.Data.Files()
 		switch {
 		case err != nil:
@@ -103,23 +90,78 @@ func (a *app) library(c *ui.Context) {
 			a.add(files)
 		}
 	}
+	root.Children(func() {
+		a.toolbar(c, narrow)
+		ui.Divider(c)
+		ui.Row(c).Grow(1).MinHeight(0).AlignItems(ui.Stretch).Children(func() {
+			a.library(c, dragging && !a.busy())
+			ui.Divider(c)
+			a.editor(c)
+			if !narrow {
+				ui.Divider(c)
+				a.controls(c, ui.Column(c.Key("settings")).Shrink(0))
+			}
+		})
+		ui.Divider(c)
+		a.footer(c)
+	})
+	a.confirmRefilter(c)
+}
+
+func (a *app) toolbar(c *ui.Context, narrow bool) {
+	ui.Row(c).Gap(8).Height(headerHeight).Shrink(0).Padding(0, workspaceInset).AlignItems(ui.Center).Children(func() {
+		ui.Image(c, appIcon).Size(27, 27)
+		ui.Text(c, title).FontSize(16).Bold()
+		ui.Spacer(c)
+		if narrow {
+			button := textAction(c.Key("settings-button"), "过滤设置", true, func() { a.settingsOpen = !a.settingsOpen }).
+				HasPopup(ui.PopupDialog).Expanded(a.settingsOpen)
+			open := a.settingsOpen
+			ui.Overlay(c, func() {}) // Keep the overlay parent alive for the exit animation.
+			ui.PopoverBase(c.Key("settings-popover"), button, &a.settingsOpen, func(panel ui.Element) {
+				panel.AttachTo(button, ui.AnchorBottomEnd, ui.AnchorTopEnd).Radius(controlRadius).
+					BorderColor(border).BorderWidth(1).Focusable().AutoFocus().Label("过滤设置").
+					Transition(reveal(c, &ui.Motion{Y: -4, Flip: true}, true))
+				a.controls(c, panel)
+			})
+			if open && !a.settingsOpen {
+				button.Focus()
+			}
+		}
+		textAction(c.Key("export-clips"), "导出切片", !a.busy() && a.canExport(true), func() { a.chooseExport(true) }).
+			Tooltip("将素材的各段导出为独立文件")
+		primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(false), func() { a.chooseExport(false) }).
+			Label("导出合并媒体").Tooltip("每个素材导出一个文件，只拼接保留片段")
+	})
+}
+
+func reveal(c *ui.Context, motion *ui.Motion, exit bool) ui.ElementTransition {
+	duration := revealDuration
+	if c.Preferences().ReduceMotion {
+		duration = -1
+	}
+	transition := ui.ElementTransition{Duration: duration, Enter: motion, Position: true}
+	if exit {
+		transition.Exit = motion
+	}
+	return transition
+}
+
+func (a *app) library(c *ui.Context, dragging bool) {
+	panel := ui.Column(c.Key("library")).Width(sideWidth).Shrink(0).Padding(railInset).Background(rail).Gap(8)
+	if dragging {
+		panel.Background(hoverFace).Draw(func(p *ui.Painter, r ui.Rect) { p.Stroke(r, accent, 0, 2) })
+	}
 	panel.Children(func() {
 		ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "素材").FontSize(15).Bold()
+			ui.Text(c, "素材").FontSize(14).Bold()
 			if len(a.assets) > 0 {
 				ui.Textf(c, "%d", len(a.assets)).TextColor(muted).FontSize(12)
 			}
 			ui.Spacer(c)
 			iconButton(c.Key("remove"), iconRemove, "从列表移除", "移除所选素材", a.selected != nil && !a.busy(), false, a.removeSelected)
-			iconButton(c.Key("add"), iconAdd, "添加音视频…", "添加音视频文件", !a.busy(), false, a.chooseFiles)
+			iconButton(c.Key("add"), iconAdd, "添加音视频…", "添加音视频文件", !a.busy(), true, a.chooseFiles)
 		})
-		if len(a.assets) == 0 {
-			ui.Column(c).Grow(1).Center().Background(waveBack).Radius(paneRadius).Gap(8).Children(func() {
-				ui.Icon(c, iconAdd).Size(22, 22).TextColor(muted)
-				ui.Text(c, "拖入文件").FontSize(13).TextColor(muted)
-			})
-			return
-		}
 		ui.Scroll(c.Key("assets")).Grow(1).MinHeight(0).Children(func() {
 			ui.Column(c).Gap(3).Children(func() {
 				for _, item := range a.assets {
@@ -131,14 +173,16 @@ func (a *app) library(c *ui.Context) {
 }
 
 func (a *app) assetRow(c *ui.Context, item *asset) {
-	row := ui.Row(c).Gap(8).AlignItems(ui.Center).Padding(8).Radius(6).Focusable().
-		Label(item.name).Tooltip(item.path).OnClick(func() { a.selectAsset(item) })
+	row := ui.Row(c).Gap(8).AlignItems(ui.Center).Padding(9, 8).Radius(controlRadius).Focusable().FocusRing(true).
+		Label(item.name).Tooltip(item.path).OnClick(func() { a.selectAsset(item) }).
+		Transition(reveal(c, &ui.Motion{Y: -4}, true))
 	if a.selected == item {
-		row.Background(accentPale).AccessSelected(true)
-	} else if row.Pressed() {
-		row.Background(accentPale)
-	} else if row.Hovered() {
-		row.Background(waveBack)
+		row.Background(hoverFace).AccessSelected(true).Draw(func(p *ui.Painter, r ui.Rect) {
+			p.Fill(ui.Rect{X: r.X, Y: r.Y + 9, W: 2, H: r.H - 18}, accent, 1)
+		})
+	}
+	if row.Pressed() || a.selected != item {
+		actionFace(row, true)
 	}
 	row.OnShortcut(0, ui.KeyEnter, func() { a.selectAsset(item) })
 	row.Children(func() {
@@ -146,68 +190,59 @@ func (a *app) assetRow(c *ui.Context, item *asset) {
 		if item.info.Video {
 			glyph = iconVideo
 		}
-		ui.Icon(c, glyph).Size(18, 18).Shrink(0).TextColor(accent)
+		ui.Icon(c, glyph).Size(16, 16).Shrink(0).TextColor(muted)
 		ui.Column(c).MinWidth(0).Grow(1).Gap(2).Children(func() {
 			ui.Text(c, item.name).SingleLine().Ellipsis("…").FontSize(13)
 			switch {
+			case item.analyzing:
+				ui.Text(c, "正在过滤…").FontSize(11).TextColor(muted)
 			case item.issue != "":
-				ui.Text(c, item.issue).Wrap().FontSize(11).TextColor(waveRemovedInk)
+				ui.Text(c, item.issue).SingleLine().Ellipsis("…").Tooltip(item.issue).FontSize(11).TextColor(waveRemovedInk)
 			case item.info.Duration > 0:
 				ui.Text(c, clock(item.info.Duration)).FontFeatures("tnum").FontSize(11).TextColor(muted)
 			default:
-				ui.Text(c, "正在分析…").FontSize(11).TextColor(muted)
+				ui.Text(c, "待分析").FontSize(11).TextColor(muted)
 			}
 		})
 	})
 }
 
-func (a *app) preview(c *ui.Context) {
+func (a *app) editor(c *ui.Context) {
 	item := a.selected
-	canvas, textColor := waveBack, muted
-	if item != nil && item.info.Video {
-		canvas, textColor = screen, screenText
-	}
-	pane(ui.Column(c)).Grow(1).MinWidth(0).Gap(10).Children(func() {
-		ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
-			ui.Text(c, "预览").FontSize(15).Bold()
-			ui.Spacer(c)
-			if a.video != nil && !a.video.Ready() {
-				ui.Text(c, "正在打开视频…").TextColor(muted).FontSize(12)
-			} else if item != nil && item.info.Video {
-				ui.Textf(c, "%d × %d", item.info.Width, item.info.Height).TextColor(muted).FontSize(12)
+	ui.Column(c.Key("editor")).Grow(1).MinWidth(0).MinHeight(0).Padding(workspaceInset).Gap(sectionGap).Children(func() {
+		if item == nil {
+			ui.Column(c).Fill().Center().Gap(12).Children(func() {
+				ui.Icon(c, iconAudio).Size(36, 36).TextColor(accent)
+				ui.Text(c, "拖入文件").FontSize(24).Bold()
+				textAction(c.Key("empty-add"), "选取音视频…", !a.busy(), a.chooseFiles)
+			})
+			return
+		}
+		ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
+			ui.Text(c, item.name).FontSize(22).Bold().Grow(1).MinWidth(0).SingleLine().Ellipsis("…").Tooltip(item.name)
+			if item.info.Video {
+				ui.Textf(c, "%d × %d", item.info.Width, item.info.Height).FontSize(12).TextColor(muted)
+			} else if item.info.Rate > 0 {
+				ui.Textf(c, "%g kHz · %d 声道", float64(item.info.Rate)/1000, item.info.Channels).FontSize(12).TextColor(muted)
 			}
 		})
-		ui.Column(c).Grow(1).MinHeight(0).Radius(6).Background(canvas).Clip().Center().Children(func() {
-			switch {
-			case a.video != nil:
-				ui.Video(c, a.video).Fill().Fit(ui.Contain)
-			case a.previewCancel != nil:
-				ui.Text(c, "正在准备预览…").TextColor(textColor)
-			case a.previewIssue != "":
-				ui.Column(c).Padding(14).Gap(8).Center().Children(func() {
-					ui.Text(c, a.previewIssue).TextColor(textColor).Wrap()
-					ui.Button(c.Key("retry-preview"), "重试预览").Disabled(a.busy()).OnClick(func() {
-						a.closePreview()
-						item.proxy = ""
-						a.openPreview(item, false)
-					})
-				})
-			case item != nil && item.info.Duration > 0:
-				ui.Column(c).Padding(16).Gap(8).Center().Children(func() {
-					ui.Box(c).Size(50, 50).Radius(12).Background(accentPale).Center().Children(func() {
-						ui.Icon(c, iconAudio).Size(26, 26).TextColor(accent)
-					})
-					ui.Text(c, item.name).FontSize(15).Bold().MaxLines(2).Ellipsis("…")
-					ui.Textf(c, "%g kHz  ·  %d 声道", float64(item.info.Rate)/1000, item.info.Channels).
-						TextColor(muted).FontSize(12)
-				})
-			case item != nil && a.cancel != nil:
-				ui.Text(c, "正在分析素材…").TextColor(textColor)
-			default:
-				ui.Text(c, "等待素材").TextColor(textColor)
-			}
-		})
+		a.timeline(c)
 	})
+}
+
+func (a *app) previewFeedback(c *ui.Context, item *asset) {
+	if a.previewIssue != "" {
+		ui.Column(c).Padding(railInset).Gap(8).Center().Children(func() {
+			ui.Text(c, a.previewIssue).FontSize(12).TextColor(waveRemovedInk).SingleLine().Ellipsis("…").Tooltip(a.previewIssue)
+			textAction(c.Key("retry-preview"), "重试预览", !a.busy(), func() {
+				a.closePreview()
+				item.proxy = ""
+				a.openPreview(item, false)
+			})
+		})
+	} else {
+		ui.Text(c, "正在准备预览…").FontSize(12).TextColor(muted)
+	}
 }
 
 func (a *app) previewTick(c *ui.Context) {
@@ -239,59 +274,88 @@ func (a *app) previewTick(c *ui.Context) {
 	}
 }
 
-func (a *app) controls(c *ui.Context) {
-	item := a.selected
-	busy := a.busy()
-	pane(ui.Column(c)).Width(settingsWidth).Shrink(0).Gap(9).Children(func() {
-		ui.Text(c, "过滤设置").FontSize(15).Bold()
-		ui.Row(c).Gap(3).Children(func() {
-			for _, preset := range presets {
-				button := ui.Button
-				if a.opts.preset == preset {
-					button = ui.PrimaryButton
-				}
-				width := float32(44)
-				if preset == "自定义" {
-					width = 63
-				}
-				button(c.Key("preset-"+preset), preset).Width(width).FontSize(12).Padding(5, 4).Disabled(busy).
-					OnClick(func() { a.opts.preset = preset })
-			}
-		})
+func (a *app) controls(c *ui.Context, panel ui.Element) {
+	item, busy := a.selected, a.busy()
+	enabled := item != nil && !busy
+	panel.Width(settingsWidth).MinHeight(0).Padding(railInset).Gap(sectionGap).
+		Background(rail).Children(func() {
+		ui.Text(c, "过滤设置").Height(controlHeight).FontSize(14).Bold()
+		preset := max(0, slices.Index(presets, a.opts.preset))
+		tabStrip(c.Key("preset"), "剪辑节奏", &preset, presets, false, !busy, func() { a.opts.preset = presets[preset] })
 		ui.Checkbox(c.Key("ends"), &a.opts.ends, "仅修剪首尾").Disabled(busy)
+		ui.Divider(c)
 		if a.opts.preset == "自定义" {
-			field := func(label, key string, value *string) {
-				ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, label).Grow(1).FontSize(12)
-					ui.TextInput(c.Key(key), value).Width(62).Label(label).Disabled(busy)
+			_, issues := a.opts.custom()
+			field := func(label, key string, value *string, issue string) {
+				ui.Column(c).Gap(3).Children(func() {
+					var input ui.Element
+					ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, label).Grow(1).FontSize(12)
+						input = ui.TextInput(c.Key(key), value).Width(60).Label(label).Disabled(busy)
+					})
+					if a.validateSettings && issue != "" {
+						input.ErrorMessage(ui.Text(c, issue).FontSize(11).TextColor(waveRemovedInk)).Invalid(true)
+					}
 				})
 			}
-			field("静音阈值 (dB)", "threshold", &a.opts.level)
-			field("片段前留白 (秒)", "padding-before", &a.opts.before)
-			field("片段后留白 (秒)", "padding-after", &a.opts.after)
+			field("静音阈值 (dB)", "threshold", &a.opts.level, issues[0])
+			field("片段前留白 (秒)", "padding-before", &a.opts.before, issues[1])
+			field("片段后留白 (秒)", "padding-after", &a.opts.after, issues[2])
 		} else {
 			settings, _ := a.opts.settings(0)
+			threshold := "—"
 			if item != nil && len(item.peaks) > 0 {
-				ui.Textf(c, "自动阈值  %.1f dB", item.automatic).TextColor(muted).FontSize(12)
-			} else {
-				ui.Text(c, "按素材估算阈值").TextColor(muted).FontSize(12)
+				threshold = fmt.Sprintf("%.1f dB", item.automatic)
 			}
-			ui.Textf(c, "前后各留 %.2f 秒", float64(settings.Before)/1e6).TextColor(muted).FontSize(12)
+			settingValue(c, "自动阈值", threshold)
+			settingValue(c, "前后各留", fmt.Sprintf("%.2f 秒", float64(settings.Before)/1e6))
 		}
-		ui.Spacer(c)
+		ui.Divider(c)
 		if item != nil && len(item.history.Clips) > 0 && !busy {
 			settings, err := a.opts.settings(item.automatic)
 			if err != nil || settings != item.settings {
 				ui.Text(c, "设置待应用").FontSize(12).TextColor(accent)
 			}
 		}
-		ui.Row(c).Gap(6).Children(func() {
-			ui.Button(c.Key("rerun"), "重新过滤").Grow(1).Disabled(item == nil || busy).
-				OnClick(func() { a.filter([]*asset{item}) })
-			ui.Button(c.Key("rerun-all"), "应用到全部").Disabled(len(a.assets) < 2 || busy).
-				OnClick(func() { a.filter(a.assets) })
+		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+			textAction(c.Key("rerun"), "重新过滤", enabled, func() { a.requestFilter([]*asset{item}) }).
+				TextColor(actionColor(enabled, true))
+			textAction(c.Key("rerun-all"), "应用到全部", len(a.assets) > 1 && !busy, func() { a.requestFilter(a.assets) })
 		})
 		ui.Checkbox(c.Key("kept-only"), &a.onlyKept, "切片仅导出保留段").Disabled(busy)
+	})
+}
+
+func (a *app) confirmRefilter(c *ui.Context) {
+	open := len(a.refilter) > 0
+	ui.DialogBase(c.Key("confirm-filter"), &open, func(back, panel ui.Element) {
+		back.Background(screen.Alpha(.64))
+		panel.Width(350).Padding(workspaceInset).Gap(sectionGap).Radius(controlRadius).Background(rail).
+			Label("确认重新过滤").Transition(reveal(c, &ui.Motion{}, false))
+		ui.Text(c, "重新过滤？").FontSize(16).Bold()
+		ui.Textf(c, "重新过滤会覆盖 %d 个素材的手工编辑。", a.refilterCount).FontSize(13).Wrap()
+		ui.Row(c).Gap(8).Children(func() {
+			ui.Spacer(c)
+			textAction(c.Key("keep-edits"), "取消", true, func() { a.refilter = nil }).AutoFocus()
+			primaryAction(c.Key("confirm"), "重新过滤", true, func() {
+				items := a.refilter
+				a.refilter = nil
+				if len(items) > 0 {
+					a.filter(items)
+				}
+			})
+		})
+	})
+	if !open {
+		a.refilter = nil
+	}
+}
+
+func settingValue(c *ui.Context, label, value string) {
+	ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+		ui.Text(c, label).FontSize(12).TextColor(muted)
+		ui.Spacer(c)
+		ui.Text(c, value).FontSize(13).FontFeatures("tnum")
 	})
 }
 
@@ -341,18 +405,27 @@ func (a *app) history(redo bool) {
 }
 
 func (a *app) footer(c *ui.Context) {
-	ui.Row(c).AlignItems(ui.Center).Gap(10).Height(27).Children(func() {
+	ui.Row(c).AlignItems(ui.Center).Gap(10).Shrink(0).Height(38).Padding(0, workspaceInset).Children(func() {
 		if a.cancel != nil {
-			ui.Text(c, a.job).FontSize(12)
+			job := "正在" + a.job
+			if a.canceling {
+				job = "正在取消" + a.job
+			}
+			ui.Text(c.Key("job-status"), job).FontSize(12).Role(ui.RoleStatus)
 			ui.Progress(c, a.progress).Grow(1)
 			ui.Textf(c, "%.0f%%", a.progress*100).FontSize(12).TextColor(muted)
-			ui.Button(c.Key("cancel"), "取消").OnClick(a.cancel)
+			textAction(c.Key("cancel"), "取消", !a.canceling, a.cancelJob)
 			return
 		}
-		ui.Text(c, a.status).Grow(1).FontSize(12).TextColor(muted).SingleLine().Ellipsis("…").Tooltip(a.status)
-		if a.outputDir != "" {
-			ui.Button(c.Key("output-folder"), "打开导出文件夹").OnClick(func() {
-				if err := mygo.Shell.OpenPath(a.outputDir); err != nil {
+		ui.Text(c.Key("job-status"), a.status).Grow(1).FontSize(12).TextColor(muted).
+			SingleLine().Ellipsis("…").Tooltip(a.status).Role(ui.RoleStatus)
+		if a.selection.End > a.selection.Start {
+			ui.Text(c, "选区 "+clock(a.selection.Start)+" – "+clock(a.selection.End)).
+				FontFeatures("tnum").FontSize(12).TextColor(muted)
+		}
+		if a.publishedDir != "" {
+			textAction(c.Key("output-folder"), "打开导出文件夹", true, func() {
+				if err := mygo.Shell.OpenPath(a.publishedDir); err != nil {
 					a.status = err.Error()
 				}
 			})
