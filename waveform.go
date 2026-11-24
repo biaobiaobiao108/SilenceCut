@@ -306,10 +306,12 @@ func (a *app) invertAtPlayhead() {
 }
 
 func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
+	var waveHandle ui.Handle
 	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Radius(surfaceRadius).Background(waveBack).
 		BorderColor(border).BorderWidth(1).Clip().
 		Focusable().FocusRing(true).Label("音频波形和播放位置").
-		Description("横向滚动波形平移视图；拖动游标到左右边缘继续浏览；用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点")
+		Description("横向滚动波形平移视图；拖动游标到左右边缘继续浏览；用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点").
+		ContextMenu(a.waveMenu(item)).Bind(&waveHandle)
 	clips := item.history.Clips
 	if i := clipAt(clips, a.position); i < len(clips) {
 		kind := "移除片段"
@@ -335,9 +337,17 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 		}
 	}
 	length := a.detailLength(duration)
+	span := timeline.Span{Start: a.viewStart, End: a.viewStart + length}
 	x, y, over := e.PointerPosition()
 	w := e.Bounds().W
 	e.HandleInput(func(ev ui.InputEvent) bool {
+		if ev.Kind == ui.InputPointerDown && ev.Button == 1 && duration > 0 {
+			if width := waveHandle.Bounds(c).W; width > 0 {
+				at := span.Start + int64(math.Round(float64(max(0, min(ev.X/width, 1)))*float64(length)))
+				a.seek(at)
+			}
+			return false
+		}
 		if ev.Kind != ui.InputScroll || !allowed {
 			return false
 		}
@@ -359,6 +369,45 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 				Padding(6, 8).MaxWidth(max(0, w-16)).Background(rail).Children(func() { a.previewFeedback(c, item) })
 		}
 	})
+}
+
+func (a *app) waveMenu(item *asset) func(*ui.Menu) {
+	return func(m *ui.Menu) {
+		enabled := !a.busy() && a.selected == item && item.info.Duration > 0
+		kept := int64(0)
+		for _, clip := range item.history.Clips {
+			if clip.Keep {
+				kept += clip.End - clip.Start
+			}
+		}
+		playable := enabled && a.previewPlayable(kept)
+		if m.Item("从此处播放/暂停").Disabled(!playable).Chosen() {
+			a.togglePlay()
+		}
+		if _, ok := a.timelineSelection(item); ok {
+			if m.Item("导出选中区域…").Disabled(!enabled || item.offline || item.issue != "").Chosen() {
+				a.chooseSelectionExport()
+			}
+		}
+		m.Separator()
+		editable := false
+		if enabled {
+			_, editable = a.editSpan()
+		}
+		if m.Item("保留").Disabled(!editable).Chosen() {
+			a.edit(true)
+		}
+		if m.Item("移除").Disabled(!editable).Chosen() {
+			a.edit(false)
+		}
+		m.Separator()
+		if m.Item("撤销").Disabled(!enabled || !item.history.CanUndo()).Chosen() {
+			a.history(false)
+		}
+		if m.Item("重做").Disabled(!enabled || !item.history.CanRedo()).Chosen() {
+			a.history(true)
+		}
+	}
 }
 
 func (a *app) handleWave(c *ui.Context, e ui.Element, item *asset, w, x, y float32, length int64, over, pressed, allowed bool) {

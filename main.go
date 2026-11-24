@@ -317,12 +317,18 @@ func (a *app) selectAsset(item *asset) {
 }
 
 func (a *app) removeSelected() {
-	selected := a.selected
-	if selected == nil || a.busy() {
+	a.removeAsset(a.selected)
+}
+
+func (a *app) removeAsset(item *asset) {
+	if item == nil || a.busy() {
 		return
 	}
-	index := slices.Index(a.assets, selected)
-	a.assets = slices.Delete(a.assets, index, index+1)
+	index := slices.Index(a.assets, item)
+	if index < 0 {
+		return
+	}
+	a.assets = slices.Concat(a.assets[:index], a.assets[index+1:])
 	if len(a.assets) == 0 {
 		a.selectAsset(nil)
 	} else {
@@ -594,6 +600,70 @@ func exportAsset(ctx context.Context, item asset, dir string, progress media.Pro
 		return 0, err
 	}
 	return 1, nil
+}
+
+func (a *app) timelineSelection(item *asset) (timeline.Span, bool) {
+	if item == nil {
+		return timeline.Span{}, false
+	}
+	span := a.selection
+	return span, span.Start >= 0 && span.End > span.Start && span.End <= item.info.Duration
+}
+
+func (a *app) chooseSelectionExport() {
+	item := a.selected
+	span, ok := a.timelineSelection(item)
+	if a.busy() || item == nil || item.offline || item.issue != "" || !ok {
+		return
+	}
+	a.pick(mygo.OpenDialogOptions{
+		Parent: a.win, Title: "导出选中区域", DefaultPath: a.outputDir, Directory: true,
+		CreateDirectories: true, ButtonLabel: "导出选中区域",
+	}, func(paths []string) { a.exportSelection(item, span, paths[0]) })
+}
+
+func (a *app) exportSelection(item *asset, span timeline.Span, dir string) {
+	if a.busy() || item == nil {
+		return
+	}
+	a.outputDir = dir
+	item.exportIssue = ""
+	snapshot := *item
+	ctx := a.begin("导出选中区域")
+	a.async(func() {
+		path, err := exportSelectionAsset(ctx, snapshot, span, dir, a.report())
+		status := "已导出选中区域 · " + filepath.Base(path)
+		switch {
+		case errors.Is(err, context.Canceled):
+			status = "已取消导出选中区域"
+		case err != nil:
+			status = "导出选中区域失败 · " + err.Error()
+		}
+		a.win.Update(func() {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				item.exportIssue = err.Error()
+			}
+			if err == nil {
+				a.publishedDir = dir
+			}
+			a.end(status)
+		})
+	})
+}
+
+func exportSelectionAsset(ctx context.Context, item asset, span timeline.Span, dir string, progress media.Progress) (string, error) {
+	if span.Start < 0 || span.End <= span.Start || item.info.Duration <= 0 || span.End > item.info.Duration {
+		return "", errors.New("选区超出素材范围")
+	}
+	current, err := os.Stat(item.path)
+	if err != nil {
+		return "", err
+	}
+	if changed(item.file, current) {
+		return "", errors.New("素材已改变，请先重新过滤")
+	}
+	base := strings.TrimSuffix(item.name, filepath.Ext(item.name))
+	return media.Export(ctx, item.path, dir, base+"_选中区域", []timeline.Span{span}, progress)
 }
 
 func (a *app) closePreview() {

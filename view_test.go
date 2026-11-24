@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"image/png"
 	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -685,4 +688,305 @@ func TestOriginalVideoPreviewError(t *testing.T) {
 	if _, ok := view.Find("重试预览"); !ok {
 		t.Fatal("source video failure has no retry action")
 	}
+}
+
+func TestAssetContextMenus(t *testing.T) {
+	first := &asset{path: "first.wav", name: "第一段.wav"}
+	second := &asset{path: "second.wav", name: "第二段.wav"}
+	a := &app{assets: []*asset{first, second}, selected: second, opts: filterOptions{preset: "中等"}}
+	view := ui.NewTester(a.view, 1180, 790)
+	want := []string{"在文件夹中显示", "复制路径", "-", "重新过滤", "-", "从列表移除"}
+
+	if err := view.RightClick(first.name); err != nil {
+		t.Fatal(err)
+	}
+	if a.selected != first || !slices.Equal(view.Menu(), want) {
+		t.Fatalf("right-click selected %v and opened %q, want %q", a.selected, view.Menu(), want)
+	}
+	view.CloseMenu()
+
+	if err := view.Click(second.name); err != nil || a.selected != second {
+		t.Fatalf("select second row: %v, selected %v", err, a.selected)
+	}
+	view.Key(0, ui.KeyContextMenu)
+	if !slices.Equal(view.Menu(), want) {
+		t.Fatalf("menu key opened %q, want %q", view.Menu(), want)
+	}
+	view.CloseMenu()
+
+	if err := view.Click(first.name); err != nil {
+		t.Fatal(err)
+	}
+	view.Key(ui.Shift, ui.KeyF10)
+	if !slices.Equal(view.Menu(), want) {
+		t.Fatalf("Shift+F10 opened %q, want %q", view.Menu(), want)
+	}
+	if err := view.ChooseMenuItem("从列表移除"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(a.assets, []*asset{second}) {
+		t.Fatalf("the first row's menu removed %v", a.assets)
+	}
+}
+
+func TestAssetContextMenuStates(t *testing.T) {
+	checkDisabled := func(t *testing.T, view *ui.Tester, label string) {
+		t.Helper()
+		if err := view.ChooseMenuItem(label); err == nil || !strings.Contains(err.Error(), "disabled") {
+			t.Fatalf("%q: %v, want disabled", label, err)
+		}
+	}
+
+	t.Run("busy loaded", func(t *testing.T) {
+		item := &asset{path: "busy.wav", name: "忙碌.wav"}
+		a := &app{assets: []*asset{item}, selected: item, picking: true, opts: filterOptions{preset: "中等"}}
+		view := ui.NewTester(a.view, 1180, 790)
+		if err := view.RightClick(item.name); err != nil {
+			t.Fatal(err)
+		}
+		checkDisabled(t, view, "重新过滤")
+		checkDisabled(t, view, "从列表移除")
+		view.CloseMenu()
+	})
+
+	t.Run("offline", func(t *testing.T) {
+		item := &asset{path: "offline.wav", name: "离线.wav", offline: true}
+		a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "中等"}}
+		view := ui.NewTester(a.view, 1180, 790)
+		if err := view.RightClick(item.name); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"重新定位…", "-", "从列表移除"}
+		if !slices.Equal(view.Menu(), want) {
+			t.Fatalf("offline menu = %q, want %q", view.Menu(), want)
+		}
+		view.CloseMenu()
+
+		a.picking = true
+		if err := view.RightClick(item.name); err != nil {
+			t.Fatal(err)
+		}
+		checkDisabled(t, view, "重新定位…")
+		checkDisabled(t, view, "从列表移除")
+		view.CloseMenu()
+	})
+
+	t.Run("pending", func(t *testing.T) {
+		item := &asset{path: "pending.wav", name: "待读取.wav", offline: true, pendingLoad: true}
+		a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "中等"}}
+		view := ui.NewTester(a.view, 1180, 790)
+		if err := view.RightClick(item.name); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"在文件夹中显示", "复制路径", "-", "从列表移除"}
+		if !slices.Equal(view.Menu(), want) {
+			t.Fatalf("pending menu = %q, want %q", view.Menu(), want)
+		}
+	})
+}
+
+func TestWaveContextMenu(t *testing.T) {
+	const second = timeline.Second
+	initial := []timeline.Clip{
+		{Span: timeline.Span{End: 10 * second}, Keep: true},
+		{Span: timeline.Span{Start: 10 * second, End: 15 * second}},
+		{Span: timeline.Span{Start: 15 * second, End: 30 * second}, Keep: true},
+	}
+	item := &asset{info: media.Info{Duration: 30 * second, Video: true}, history: timeline.History{Clips: slices.Clone(initial)}}
+	p := &dragPreview{seeks: []int64{18 * second}}
+	a := &app{selected: item, player: p, position: 10 * second,
+		selection: timeline.Span{Start: 7 * second, End: 8 * second}, viewStart: 5 * second, viewLength: 15 * second}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	x := func(at float32) float32 { return wave.X + wave.W*(at-5)/15 }
+	body := wave.Y + wave.H/2
+	selection := a.selection
+
+	view.RightClickAt(x(18), body)
+	if a.position < 18*second-40_000 || a.position > 18*second+40_000 || a.selection != selection {
+		t.Fatalf("right-click moved to %d and changed selection to %v", a.position, a.selection)
+	}
+	wantSelected := []string{"从此处播放/暂停", "导出选中区域…", "-", "保留", "移除", "-", "撤销", "重做"}
+	if !slices.Equal(view.Menu(), wantSelected) {
+		t.Fatalf("selected menu = %q, want %q", view.Menu(), wantSelected)
+	}
+	if err := view.ChooseMenuItem("移除"); err != nil {
+		t.Fatal(err)
+	}
+	i := clipAt(item.history.Clips, 7*second+1)
+	if i >= len(item.history.Clips) || item.history.Clips[i].Keep ||
+		item.history.Clips[i].Start != 7*second || item.history.Clips[i].End != 8*second {
+		t.Fatalf("selection edit = %+v", item.history.Clips)
+	}
+
+	view.RightClickAt(x(18), body)
+	if err := view.ChooseMenuItem("撤销"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(item.history.Clips, initial) {
+		t.Fatalf("undo restored %+v, want %+v", item.history.Clips, initial)
+	}
+	view.RightClickAt(x(18), body)
+	if err := view.ChooseMenuItem("重做"); err != nil {
+		t.Fatal(err)
+	}
+	i = clipAt(item.history.Clips, 7*second+1)
+	if i >= len(item.history.Clips) || item.history.Clips[i].Keep {
+		t.Fatalf("redo = %+v", item.history.Clips)
+	}
+	view.RightClickAt(x(18), body)
+	if err := view.ChooseMenuItem("撤销"); err != nil {
+		t.Fatal(err)
+	}
+
+	a.selection = timeline.Span{}
+	view.Frame()
+	view.RightClickAt(x(18), body)
+	wantCurrent := []string{"从此处播放/暂停", "-", "保留", "移除", "-", "撤销", "重做"}
+	if !slices.Equal(view.Menu(), wantCurrent) {
+		t.Fatalf("current-clip menu = %q, want %q", view.Menu(), wantCurrent)
+	}
+	if err := view.ChooseMenuItem("从此处播放/暂停"); err != nil || !p.Playing() {
+		t.Fatalf("play from menu: %v, playing %t", err, p.Playing())
+	}
+	view.RightClickAt(x(18), body)
+	if err := view.ChooseMenuItem("从此处播放/暂停"); err != nil || p.Playing() {
+		t.Fatalf("pause from menu: %v, playing %t", err, p.Playing())
+	}
+	view.RightClickAt(x(18), body)
+	if err := view.ChooseMenuItem("移除"); err != nil {
+		t.Fatal(err)
+	}
+	i = clipAt(item.history.Clips, 18*second)
+	if i >= len(item.history.Clips) || item.history.Clips[i].Keep {
+		t.Fatalf("current clip edit = %+v", item.history.Clips)
+	}
+	view.RightClickAt(x(18), body)
+	if err := view.ChooseMenuItem("撤销"); err != nil {
+		t.Fatal(err)
+	}
+
+	view.ClickAt(x(17), body)
+	afterClick := a.position
+	view.Key(ui.Shift, ui.KeyF10)
+	if a.position != afterClick || !slices.Equal(view.Menu(), wantCurrent) {
+		t.Fatalf("keyboard menu moved %d to %d or opened %q", afterClick, a.position, view.Menu())
+	}
+}
+
+func TestContextMenusStayOffOverviewAndEmptyWorkspace(t *testing.T) {
+	empty := &app{opts: filterOptions{preset: "中等"}}
+	view := ui.NewTester(empty.view, 1180, 790)
+	if err := view.RightClick("拖入音视频"); err != nil {
+		t.Fatal(err)
+	}
+	if menu := view.Menu(); menu != nil {
+		t.Fatalf("empty workspace menu = %q", menu)
+	}
+
+	item := &asset{info: media.Info{Duration: 30 * timeline.Second}}
+	a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "中等"}}
+	view = ui.NewTester(a.view, 1180, 790)
+	if err := view.RightClick("全局波形"); err != nil {
+		t.Fatal(err)
+	}
+	if menu := view.Menu(); menu != nil {
+		t.Fatalf("overview menu = %q", menu)
+	}
+}
+
+func TestSelectionExportAsset(t *testing.T) {
+	source := selectionExportFixture(t)
+	item := asset{path: source, name: filepath.Base(source)}
+	info, _, err := media.Waveform(context.Background(), source, func(float64) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.info = info
+	item.file, err = os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	span := timeline.Span{Start: timeline.Second, End: timeline.Second + timeline.Second/2}
+	one, err := exportSelectionAsset(context.Background(), item, span, dir, func(float64) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := exportSelectionAsset(context.Background(), item, span, dir, func(float64) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(one) != "选区素材_选中区域.wav" || filepath.Base(two) != "选区素材_选中区域 (2).wav" {
+		t.Fatalf("selection export names = %s, %s", one, two)
+	}
+	rendered, _, err := media.Waveform(context.Background(), one, func(float64) {})
+	if err != nil || rendered.Duration < span.End-span.Start-1000 || rendered.Duration > span.End-span.Start+1000 {
+		t.Fatalf("selection duration = %d, error %v", rendered.Duration, err)
+	}
+	decoder, err := media.OpenAudio(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoder.Close()
+	samples := make([]float32, 4096)
+	n, err := decoder.Read(samples)
+	if err != nil || n == 0 {
+		t.Fatalf("read exported selection: %d samples, %v", n, err)
+	}
+	peak := float32(0)
+	for _, sample := range samples[:n] {
+		peak = max(peak, float32(math.Abs(float64(sample))))
+	}
+	if peak < .45 || peak > .7 {
+		t.Fatalf("exported selection level = %.3f, want the second source interval", peak)
+	}
+	file, err := os.OpenFile(source, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte{0}); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exportSelectionAsset(context.Background(), item, span, dir, func(float64) {}); err == nil ||
+		!strings.Contains(err.Error(), "素材已改变") {
+		t.Fatalf("changed source export error = %v", err)
+	}
+}
+
+func selectionExportFixture(t *testing.T) string {
+	t.Helper()
+	const rate = 48000
+	const length = rate * 2
+	var wav bytes.Buffer
+	wav.WriteString("RIFF")
+	order := binary.LittleEndian
+	_ = binary.Write(&wav, order, uint32(36+length*2))
+	wav.WriteString("WAVEfmt ")
+	_ = binary.Write(&wav, order, uint32(16))
+	_ = binary.Write(&wav, order, uint16(1))
+	_ = binary.Write(&wav, order, uint16(1))
+	_ = binary.Write(&wav, order, uint32(rate))
+	_ = binary.Write(&wav, order, uint32(rate*2))
+	_ = binary.Write(&wav, order, uint16(2))
+	_ = binary.Write(&wav, order, uint16(16))
+	wav.WriteString("data")
+	_ = binary.Write(&wav, order, uint32(length*2))
+	for i := range length {
+		amplitude := .2
+		if i >= rate {
+			amplitude = .6
+		}
+		sample := int16(amplitude * 32767 * math.Sin(float64(i)*2*math.Pi*440/rate))
+		_ = binary.Write(&wav, order, sample)
+	}
+	path := filepath.Join(t.TempDir(), "选区素材.wav")
+	if err := os.WriteFile(path, wav.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

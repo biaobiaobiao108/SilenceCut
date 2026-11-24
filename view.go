@@ -255,6 +255,7 @@ func (a *app) library(c *ui.Context, dragging bool) {
 func (a *app) assetRow(c *ui.Context, item *asset) {
 	row := ui.Row(c).Height(52).Gap(8).AlignItems(ui.Center).Padding(0, 8).Radius(controlRadius).Focusable().FocusRing(true).
 		Label(item.name).Description(item.path).OnClick(func() { a.selectAsset(item) }).
+		ContextMenu(a.assetMenu(item)).
 		Transition(reveal(c, &ui.Motion{Y: -4}, true))
 	if a.selected == item {
 		row.Background(surface).AccessSelected(true).Draw(func(p *ui.Painter, r ui.Rect) {
@@ -288,6 +289,50 @@ func (a *app) assetRow(c *ui.Context, item *asset) {
 			}
 		})
 	})
+}
+
+func (a *app) assetMenu(item *asset) func(*ui.Menu) {
+	return func(m *ui.Menu) {
+		a.selectAsset(item)
+		busy := a.busy()
+		if item.pendingLoad {
+			a.assetPathItems(m, item)
+			m.Separator()
+			if m.Item("从列表移除").Disabled(busy).Chosen() {
+				a.removeAsset(item)
+			}
+			return
+		}
+		if item.offline {
+			if m.Item("重新定位…").Disabled(busy).Chosen() {
+				a.relinkProjectSource(item)
+			}
+			m.Separator()
+			if m.Item("从列表移除").Disabled(busy).Chosen() {
+				a.removeAsset(item)
+			}
+			return
+		}
+		a.assetPathItems(m, item)
+		m.Separator()
+		if m.Item("重新过滤").Disabled(busy).Chosen() {
+			a.requestFilter([]*asset{item})
+		}
+		m.Separator()
+		if m.Item("从列表移除").Disabled(busy).Chosen() {
+			a.removeAsset(item)
+		}
+	}
+}
+
+func (a *app) assetPathItems(m *ui.Menu, item *asset) {
+	if m.Item("在文件夹中显示").Chosen() {
+		mygo.Shell.ShowItemInFolder(item.path)
+	}
+	if m.Item("复制路径").Chosen() {
+		mygo.Clipboard.WriteText(item.path)
+		a.status = "已复制素材路径"
+	}
 }
 
 func (a *app) editor(c *ui.Context, dragging bool) {
