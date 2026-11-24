@@ -33,6 +33,7 @@ var (
 	iconRemove  = editorIcon(`<path d="M5 7h14m-9-3h4m-7 3 1 13h8l1-13M10 10v6m4-6v6"/>`)
 	iconOpen    = editorIcon(`<path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h3.8l2 2H18a2.5 2.5 0 0 1 2.5 2.5v1.2M4 10.7h16.7l-2.2 8H5.2z"/>`)
 	iconSave    = editorIcon(`<path d="M5 4h11l3 3v13H5zM8 4v6h8V4M8 20v-6h8v6"/>`)
+	iconExport  = editorIcon(`<path d="M12 15V4m-4 4 4-4 4 4M5 13v6h14v-6"/>`)
 	iconSliders = editorIcon(`<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="2" fill="currentColor" stroke="none"/>`)
 )
 
@@ -64,6 +65,20 @@ func flatAction(c *ui.Context, label string, enabled bool, action func()) ui.Ele
 func textAction(c *ui.Context, label string, enabled bool, action func()) ui.Element {
 	button := flatAction(c, label, enabled, action).Padding(0, 9).TextColor(actionColor(enabled, false))
 	button.Children(func() { ui.Text(c, label).FontSize(13).SingleLine() })
+	return button
+}
+
+func exportAction(c *ui.Context, enabled bool, action func()) ui.Element {
+	const label = "导出成片"
+	color := actionColor(enabled, false)
+	button := flatAction(c, label, enabled, action).Padding(0, 12).Shrink(0).
+		BorderColor(border).BorderWidth(1).TextColor(color)
+	button.Children(func() {
+		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+			ui.Icon(c, iconExport).Size(18, 18).TextColor(color)
+			ui.Text(c, label).FontSize(13).SingleLine()
+		})
+	})
 	return button
 }
 

@@ -279,6 +279,21 @@ func TestTopbarClearsNativeWindowControls(t *testing.T) {
 	item := &asset{name: "项目旁白.wav", info: media.Info{Duration: 5 * timeline.Second}}
 	a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"}}
 	view := ui.NewTester(a.view, 930, 690)
+	exportButton := func(disabled bool) {
+		t.Helper()
+		button, ok := view.AccessByRole(ui.RoleButton, "导出合并媒体")
+		if !ok || button.Disabled != disabled || button.Bounds.H != controlHeight {
+			t.Fatalf("export disabled=%t: %+v", disabled, button)
+		}
+	}
+	exportButton(true)
+	item.history.Clips = []timeline.Clip{{Span: timeline.Span{End: item.info.Duration}, Keep: true}}
+	view.Frame()
+	exportButton(false)
+	a.picking = true
+	view.Frame()
+	exportButton(true)
+	a.picking = false
 	for _, tc := range []struct {
 		name string
 		bar  ui.TitleBar
@@ -311,9 +326,11 @@ func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
 		opts: filterOptions{preset: "慢"},
 	}
 	view := ui.NewTester(a.view, width, height)
-	project, ok := view.Find(filepath.Base(projectPath))
-	if !ok || project.X+project.W > sideWidth {
-		t.Fatalf("project name crosses the material rail: %+v", project)
+	if view.HasText(filepath.Base(projectPath)) {
+		t.Fatal("project name is still visible")
+	}
+	if dirty, ok := view.Find("未保存"); !ok || dirty.X+dirty.W > sideWidth {
+		t.Fatalf("unsaved status crosses the material rail: %+v", dirty)
 	}
 	for _, label := range []string{"打开项目", "保存项目"} {
 		r, ok := view.Find(label)
@@ -323,6 +340,11 @@ func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
 	}
 	if r, ok := view.Find("导出合并媒体"); !ok || r.X < width-settingsWidth || r.X+r.W > width {
 		t.Fatalf("export button is not above the inspector column: %+v", r)
+	}
+	a.projectPath = ""
+	view.Frame()
+	if view.HasText("未命名项目") {
+		t.Fatal("untitled project name is still visible")
 	}
 }
 
@@ -466,8 +488,8 @@ func TestPlayheadAndBoundaryGestures(t *testing.T) {
 	a.selection = selection
 	view.Press(x(16), body)
 	view.Move(x(17), body)
-	if !near(a.selection.Start, 16*second) || !near(a.selection.End, 17*second) {
-		t.Fatalf("blank area did not select: %v", a.selection)
+	if draft := a.waveDrag.draft; !near(draft.Start, 16*second) || !near(draft.End, 17*second) || a.selection != selection {
+		t.Fatalf("blank area did not preview a selection: draft=%v committed=%v", draft, a.selection)
 	}
 	view.Key(0, ui.KeyEscape)
 	view.Release(x(17), body)
@@ -537,6 +559,146 @@ func TestPlayheadDragPansTimelineAtEdges(t *testing.T) {
 	view.Release(wave.X-16, body)
 	if a.viewStart != 60*second || a.position != 75*second {
 		t.Fatalf("Escape did not restore the drag start: view %d, position %d", a.viewStart, a.position)
+	}
+}
+
+func TestWaveSelectionManipulation(t *testing.T) {
+	const s = timeline.Second
+	item := &asset{info: media.Info{Duration: 30 * s}, history: timeline.History{Clips: []timeline.Clip{
+		{Span: timeline.Span{End: 10 * s}, Keep: true},
+		{Span: timeline.Span{Start: 10 * s, End: 30 * s}},
+	}}}
+	p := &dragPreview{seeks: []int64{10 * s}}
+	a := &app{selected: item, player: p, position: 10 * s}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	x := func(at float32) float32 { return wave.X + wave.W*at/30 }
+	body, ruler, boundary := wave.Y+wave.H/2, wave.Y+3, wave.Y+rulerHeight+4
+	assertSpan := func(got timeline.Span, start, end int64) {
+		t.Helper()
+		if math.Abs(float64(got.Start-start)) > 5 || math.Abs(float64(got.End-end)) > 5 {
+			t.Fatalf("selection = %+v, want [%d, %d)", got, start, end)
+		}
+	}
+	drag := func(from, to, y float32) {
+		view.Press(x(from), y)
+		view.Release(x(to), y)
+	}
+
+	view.Press(x(20), body)
+	view.Move(x(16), body)
+	assertSpan(a.waveDrag.draft, 16*s, 20*s)
+	assertSpan(a.selection, 0, 0)
+	if a.position != 10*s || len(p.seeks) != 1 {
+		t.Fatalf("selection preview moved or sought the playhead: %d %v", a.position, p.seeks)
+	}
+	view.Release(x(15), body)
+	assertSpan(a.selection, 15*s, 20*s)
+	drag(15, 12, body)
+	drag(20, 22, body)
+	assertSpan(a.selection, 12*s, 22*s)
+	drag(16, 24, body)
+	assertSpan(a.selection, 20*s, 30*s)
+	view.Press(x(25), body)
+	view.Release(wave.X-wave.W, body)
+	assertSpan(a.selection, 0, 10*s)
+	if a.position != 10*s || len(p.seeks) != 1 || item.history.CanUndo() {
+		t.Fatalf("selection changed playback or history: %d %v", a.position, p.seeks)
+	}
+	view.Move(x(10), body)
+	if view.Cursor() != ui.CursorResizeEW {
+		t.Fatalf("selection end overlapping playhead: %v", view.Cursor())
+	}
+	view.Press(x(10), boundary)
+	if a.waveDrag.kind != waveBoundary {
+		t.Fatalf("clip trim lane lost to selection end: %v", a.waveDrag.kind)
+	}
+	view.CancelPress()
+
+	view.Press(x(5), body)
+	view.Release(x(5)+1, body)
+	assertSpan(a.selection, 0, 10*s)
+	if a.position <= 5*s || a.position >= 5*s+100_000 {
+		t.Fatalf("small movement did not click at release position: %d", a.position)
+	}
+	view.ClickAt(x(12), ruler)
+	assertSpan(a.selection, 0, 10*s)
+	if math.Abs(float64(a.position-12*s)) > 5 {
+		t.Fatalf("ruler did not locate: %d", a.position)
+	}
+	view.Key(0, ui.KeyEscape)
+	assertSpan(a.selection, 0, 0)
+
+	drag(14, 20, body)
+	assertSpan(a.selection, 14*s, 20*s)
+	drag(14, 22, body)
+	if a.selection.End-a.selection.Start != 1 {
+		t.Fatalf("resize crossed the fixed endpoint: %+v", a.selection)
+	}
+	view.Press(x(20)-2, body)
+	if a.waveDrag.kind != waveSelectStart {
+		t.Fatalf("start grip of a short selection is unreachable: %v", a.waveDrag.kind)
+	}
+	view.Release(x(17), body)
+	// The short selection offsets its grips so both remain reachable.
+	if a.selection.Start < 17*s || a.selection.Start > 17*s+200_000 {
+		t.Fatalf("short selection could not be resized: %+v", a.selection)
+	}
+	selected := a.selection
+	view.Press(x(20), body)
+	view.Move(x(24), body)
+	if export, ok := a.timelineSelection(item); !ok || export != selected {
+		t.Fatalf("export saw an unfinished resize: %+v", export)
+	}
+	view.Release(x(25), body)
+	span, ok := a.timelineSelection(item)
+	if !ok || span.Start != selected.Start || math.Abs(float64(span.End-25*s)) > 5 {
+		t.Fatalf("export did not see the final resize: %+v", span)
+	}
+	if err := view.Click("保留"); err != nil || len(item.history.Clips) != 4 ||
+		item.history.Clips[2].Span != span || !item.history.Clips[2].Keep {
+		t.Fatalf("keep did not apply the adjusted range: %v %+v", err, item.history.Clips)
+	}
+	view.ClickAt(x(28), body)
+	assertSpan(a.selection, 0, 0)
+}
+
+func TestWaveSelectionEdgePanAndOverview(t *testing.T) {
+	const s = timeline.Second
+	item := &asset{info: media.Info{Duration: 120 * s}}
+	selection := timeline.Span{Start: 25 * s, End: 30 * s}
+	a := &app{selected: item, position: 33 * s, selection: selection, viewStart: 20 * s, viewLength: 30 * s}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	y := wave.Y + wave.H/2
+	view.Press(wave.X+wave.W/3, y)
+	view.Move(wave.X+wave.W+10, y)
+	view.Advance(400 * time.Millisecond)
+	if a.viewStart <= 20*s || a.waveDrag.draft.End <= 50*s {
+		t.Fatalf("selection end did not follow the panning edge: %d %+v", a.viewStart, a.waveDrag.draft)
+	}
+	view.CancelPress()
+	if a.viewStart != 20*s || a.position != 33*s || a.selection != selection {
+		t.Fatalf("system cancel did not restore the timeline: %d %d %+v", a.viewStart, a.position, a.selection)
+	}
+	overview, _ := view.Find("全局波形")
+	x := func(at float32) float32 { return overview.X + overview.W*at/120 }
+	y = overview.Y + overview.H/2
+	view.Press(x(80), y)
+	view.Release(x(90), y)
+	if math.Abs(float64(a.viewStart-75*s)) > 20 || a.position != 33*s || a.selection != selection {
+		t.Fatalf("overview drag unexpectedly sought or cleared selection: %d %d %+v", a.viewStart, a.position, a.selection)
+	}
+	view.Press(x(90), y)
+	view.Move(x(105), y)
+	view.Key(0, ui.KeyEscape)
+	view.Release(x(105), y)
+	if math.Abs(float64(a.viewStart-75*s)) > 20 || a.position != 33*s {
+		t.Fatalf("overview Escape did not restore the viewport: %d %d", a.viewStart, a.position)
+	}
+	view.ClickAt(x(40), y)
+	if math.Abs(float64(a.position-40*s)) > 20 || math.Abs(float64(a.viewStart-25*s)) > 20 || a.selection != selection {
+		t.Fatalf("overview click did not center without clearing selection: %d %d %+v", a.position, a.viewStart, a.selection)
 	}
 }
 
@@ -914,7 +1076,19 @@ func TestSelectionExportAsset(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	span := timeline.Span{Start: timeline.Second, End: timeline.Second + timeline.Second/2}
+	a := &app{selected: &item}
+	view := ui.NewTester(a.view, 1180, 790)
+	wave, _ := view.Find("音频波形和播放位置")
+	x := func(fraction float32) float32 { return wave.X + wave.W*fraction }
+	y := wave.Y + wave.H/2
+	view.Press(x(.5), y)
+	view.Release(x(.625), y)
+	view.Press(x(.625), y)
+	view.Release(x(.75), y)
+	span, ok := a.timelineSelection(&item)
+	if !ok || span.Start != timeline.Second || span.End != timeline.Second+timeline.Second/2 {
+		t.Fatalf("selection for export = %+v", span)
+	}
 	one, err := exportSelectionAsset(context.Background(), item, span, dir, func(float64) {})
 	if err != nil {
 		t.Fatal(err)

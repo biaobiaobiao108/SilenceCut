@@ -17,6 +17,8 @@ const (
 	rulerHeight   = 22
 	handleHeight  = 13
 	hitRadius     = 6
+	waveDragSlop  = 3
+	selectionGrip = 4
 	boundaryNudge = 100_000
 	seekInterval  = 33 * time.Millisecond
 	waveEdgeZone  = 24
@@ -38,24 +40,27 @@ const (
 	waveLocate
 	waveBoundary
 	wavePlayhead
-	waveCanceled
+	waveScrub
+	waveSelectStart
+	waveSelectEnd
+	waveSelectMove
 )
 
 type waveGesture struct {
-	kind                waveDragKind
-	leftKeep, selecting bool
-	at, end, min, max   int64
-	offset, viewStart   int64
-	position            int64
-	selection           timeline.Span
-	x                   float32
-	lastSeek, lastPan   time.Time
+	kind              waveDragKind
+	leftKeep, moved   bool
+	at, end, min, max int64
+	offset, viewStart int64
+	position          int64
+	selection, draft  timeline.Span
+	x                 float32
+	lastSeek, lastPan time.Time
 }
 
 type overviewGesture struct {
-	active, pendingClick bool
-	offset, at           int64
-	x                    float32
+	active, moved     bool
+	offset, viewStart int64
+	x                 float32
 }
 
 func (a *app) detailLength(duration int64) int64 {
@@ -107,7 +112,7 @@ func (a *app) panWave(dx float32, duration, length int64, width float32) bool {
 	return true
 }
 
-func (a *app) dragPlayhead(c *ui.Context, drag *waveGesture, x, width float32, duration, length int64) {
+func (a *app) panWaveDrag(c *ui.Context, drag *waveGesture, x, width float32, duration, length int64) bool {
 	now := c.Now()
 	elapsed := now.Sub(drag.lastPan)
 	if elapsed < 0 {
@@ -115,6 +120,7 @@ func (a *app) dragPlayhead(c *ui.Context, drag *waveGesture, x, width float32, d
 	}
 	elapsed = min(elapsed, 50*time.Millisecond)
 	drag.lastPan = now
+	start := a.viewStart
 
 	direction, depth := 0, float32(0)
 	switch {
@@ -133,18 +139,7 @@ func (a *app) dragPlayhead(c *ui.Context, drag *waveGesture, x, width float32, d
 			c.After(wavePanTick)
 		}
 	}
-
-	target := a.viewStart + int64(math.Round(float64(max(0, min(x, width)))/float64(width)*float64(length))) + drag.offset
-	if x < 0 {
-		target = a.viewStart
-	} else if x > width {
-		target = a.viewStart + length
-	}
-	a.position = max(0, min(duration, target))
-	if a.position != drag.end && (drag.lastSeek.IsZero() || now.Sub(drag.lastSeek) >= seekInterval) {
-		a.seek(a.position)
-		drag.lastSeek, drag.end = now, a.position
-	}
+	return a.viewStart != start
 }
 
 func clipAt(clips []timeline.Clip, at int64) int {
@@ -313,10 +308,12 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Radius(surfaceRadius).Background(waveBack).
 		BorderColor(border).BorderWidth(1).Clip().
 		Focusable().FocusRing(true).Label("音频波形和播放位置").
-		Description("横向滚动波形平移视图；拖动游标到左右边缘继续浏览；用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点").
+		Description("点击定位，拖动建立选区，拖动选区内部移动，拖动两端调整范围。Escape 取消拖动或清除选区。横向滚动平移视图，左右方向键移动游标，Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点").
 		ContextMenu(a.waveMenu(item)).Bind(&waveHandle)
 	clips := item.history.Clips
-	if i := clipAt(clips, a.position); i < len(clips) {
+	if selected, ok := a.timelineSelection(item); ok {
+		e.Value("选区 " + clock(selected.Start) + " 至 " + clock(selected.End))
+	} else if i := clipAt(clips, a.position); i < len(clips) {
 		kind := "移除片段"
 		if clips[i].Keep {
 			kind = "保留片段"
@@ -331,6 +328,9 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 			a.followPlayhead()
 		}
 		if a.waveDrag.kind == waveIdle {
+			if a.selection.End > a.selection.Start {
+				e.OnShortcut(0, ui.KeyEscape, func() { a.selection = timeline.Span{} })
+			}
 			e.OnShortcut(0, ui.KeyLeft, func() { nudge(-100_000) })
 			e.OnShortcut(0, ui.KeyRight, func() { nudge(100_000) })
 			e.OnShortcut(ui.Alt, ui.KeyLeft, func() { a.nudgeCurrentBoundary(true, -boundaryNudge) })
@@ -340,29 +340,54 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 		}
 	}
 	length := a.detailLength(duration)
-	span := timeline.Span{Start: a.viewStart, End: a.viewStart + length}
 	x, y, over := e.PointerPosition()
 	w := e.Bounds().W
 	e.HandleInput(func(ev ui.InputEvent) bool {
-		if ev.Kind == ui.InputPointerDown && ev.Button == 1 && duration > 0 {
-			if width := waveHandle.Bounds(c).W; !a.busy() && a.selected == item && width > 0 {
-				at := span.Start + int64(math.Round(float64(max(0, min(ev.X/width, 1)))*float64(length)))
-				a.seek(at)
+		if a.selected != item {
+			return false
+		}
+		width := waveHandle.Bounds(c).W
+		length := a.detailLength(duration)
+		switch ev.Kind {
+		case ui.InputPointerDown:
+			if a.busy() || width <= 0 || a.waveDrag.kind != waveIdle || a.overviewDrag.active {
+				return false
 			}
-			return false
+			switch ev.Button {
+			case 0:
+				a.beginWave(item, ev.X, ev.Y, width, length, ev.Time)
+				return true
+			case 1:
+				a.seek(a.viewStart + waveTime(ev.X, width, length))
+			}
+		case ui.InputPointerMove:
+			if ev.Button == 0 && !a.busy() && width > 0 && a.waveDrag.kind != waveIdle && a.waveDrag.markMovement(ev.X, ev.Time) {
+				a.updateWaveDrag(ev.Time, item, ev.X, width, length, true)
+				return true
+			}
+		case ui.InputPointerUp:
+			if ev.Button != 0 || a.waveDrag.kind == waveIdle {
+				return false
+			}
+			if ev.Canceled || a.busy() || width <= 0 {
+				a.cancelWave()
+			} else {
+				a.finishWave(item, ev.X, ev.Y, width, length, ev.Time)
+			}
+			return true
+		case ui.InputScroll:
+			if !a.busy() && a.waveDrag.kind == waveIdle && !a.overviewDrag.active {
+				dx := ev.DX
+				if dx == 0 && ev.Mods&ui.Shift != 0 {
+					dx = ev.DY
+				}
+				return a.panWave(dx, duration, length, width)
+			}
 		}
-		if ev.Kind != ui.InputScroll || !allowed {
-			return false
-		}
-		dx := ev.DX
-		if dx == 0 && ev.Mods&ui.Shift != 0 {
-			dx = ev.DY
-		}
-		return a.panWave(dx, duration, length, w)
+		return false
 	})
-	_, _, pressed := e.Dragged()
 	if w > 0 {
-		a.handleWave(c, e, item, w, x, y, length, over, pressed, allowed)
+		a.trackWave(c, e, item, w, x, y, length, over, allowed)
 	}
 	e.Children(func() {
 		ui.Box(c.Key(item.path)).Fill().Transition(reveal(c, &ui.Motion{}, false)).
@@ -413,113 +438,189 @@ func (a *app) waveMenu(item *asset) func(*ui.Menu) {
 	}
 }
 
-func (a *app) handleWave(c *ui.Context, e ui.Element, item *asset, w, x, y float32, length int64, over, pressed, allowed bool) {
-	drag := &a.waveDrag
-	if drag.kind != waveIdle && drag.kind != waveCanceled && (!allowed || e.PressCanceled()) {
-		a.cancelWave()
-	}
-	if drag.kind == waveCanceled {
-		if !pressed {
-			*drag = waveGesture{}
-		}
-		return
-	}
-	if !allowed {
-		return
-	}
+func (a *app) beginWave(item *asset, x, y, width float32, length int64, now time.Time) {
 	span := timeline.Span{Start: a.viewStart, End: a.viewStart + length}
-	at := span.Start + int64(math.Round(float64(max(0, min(x/w, 1)))*float64(length)))
-	kind, boundary := waveLocate, -1
-	if (over || pressed) && drag.kind == waveIdle {
-		kind, boundary = waveHit(item.history.Clips, span, a.position, w, x, y, at)
-	}
-	if drag.kind == waveIdle && pressed {
-		a.stopPlayback()
-		*drag = waveGesture{
-			kind: kind, x: x, at: at, end: at, position: a.position, selection: a.selection,
-			viewStart: a.viewStart, lastPan: c.Now(),
-		}
-		switch kind {
-		case waveBoundary:
-			left, right := item.history.Clips[boundary], item.history.Clips[boundary+1]
-			drag.at, drag.end, drag.min, drag.max, drag.leftKeep = left.End, left.End, left.Start, right.End, left.Keep
-		case waveLocate:
-			a.selection = timeline.Span{}
-			a.seek(at)
-		case wavePlayhead:
-			drag.end = a.position
-			drag.offset = a.position - at
-		}
-	}
-	if drag.kind != waveIdle {
-		kind = drag.kind
+	at := span.Start + waveTime(x, width, length)
+	clips := item.history.Clips
+	kind, boundary := waveHit(clips, span, a.selection, a.position, width, x, y, at)
+	a.stopPlayback()
+	drag := waveGesture{
+		kind: kind, x: x, at: at, end: at, position: a.position, selection: a.selection,
+		viewStart: a.viewStart, lastPan: now,
 	}
 	switch kind {
+	case waveBoundary:
+		left, right := clips[boundary], clips[boundary+1]
+		drag.at, drag.end, drag.min, drag.max, drag.leftKeep = left.End, left.End, left.Start, right.End, left.Keep
 	case wavePlayhead:
+		drag.end, drag.offset = a.position, a.position-at
+	case waveScrub:
+		drag.end = a.position
+	case waveSelectStart:
+		drag.offset = a.selection.Start - at
+	case waveSelectEnd:
+		drag.offset = a.selection.End - at
+	}
+	a.waveDrag = drag
+}
+
+func (a *app) trackWave(c *ui.Context, e ui.Element, item *asset, w, x, y float32, length int64, over, allowed bool) {
+	drag := &a.waveDrag
+	if !allowed {
+		if drag.kind != waveIdle {
+			a.cancelWave()
+		}
+		return
+	}
+	if a.overviewDrag.active || !over && drag.kind == waveIdle {
+		return
+	}
+	kind := drag.kind
+	if kind == waveIdle {
+		span := timeline.Span{Start: a.viewStart, End: a.viewStart + length}
+		kind, _ = waveHit(item.history.Clips, span, a.selection, a.position, w, x, y, span.Start+waveTime(x, w, length))
+	} else if drag.moved && kind != waveBoundary && a.panWaveDrag(c, drag, x, w, item.info.Duration, length) {
+		a.updateWaveDrag(c.Now(), item, x, w, length, true)
+	}
+	switch kind {
+	case wavePlayhead, waveSelectMove, waveScrub:
 		cursor := ui.CursorGrab
-		if pressed {
+		if kind == waveScrub {
+			cursor = ui.CursorCrosshair
+		}
+		if drag.moved {
 			cursor = ui.CursorGrabbing
 		}
 		e.Cursor(cursor)
-	case waveBoundary:
+	case waveBoundary, waveSelectStart, waveSelectEnd:
 		e.Cursor(ui.CursorResizeEW)
 	default:
 		e.Cursor(ui.CursorCrosshair)
 	}
-	if pressed {
-		switch kind {
-		case wavePlayhead:
-			a.dragPlayhead(c, drag, x, w, item.info.Duration, length)
-		case waveBoundary:
-			if x != drag.x || drag.end != drag.at {
-				delta := int64(math.Round((float64(x) - float64(drag.x)) / float64(w) * float64(length)))
-				drag.end = max(drag.min, min(drag.max, drag.at+delta))
-			}
-		case waveLocate:
-			if drag.selecting || math.Abs(float64(x-drag.x)) >= 3 {
-				drag.selecting = true
-				a.selection = timeline.Span{Start: min(drag.at, at), End: max(drag.at, at)}
-			}
-		}
-		return
+}
+
+func (drag *waveGesture) markMovement(x float32, now time.Time) bool {
+	if !drag.moved && math.Abs(float64(x-drag.x)) >= waveDragSlop {
+		drag.moved = true
+		drag.lastPan = now
 	}
-	switch drag.kind {
-	case wavePlayhead:
-		a.seek(a.position)
-	case waveBoundary:
-		if drag.end != drag.at {
-			item.history.Edit(timeline.Span{Start: min(drag.at, drag.end), End: max(drag.at, drag.end)},
-				(drag.end > drag.at) == drag.leftKeep)
-			a.markProject()
-			a.seek(drag.end)
+	return drag.moved
+}
+
+func (a *app) finishWave(item *asset, x, y, w float32, length int64, now time.Time) {
+	drag := &a.waveDrag
+	if drag.markMovement(x, now) {
+		a.updateWaveDrag(now, item, x, w, length, false)
+	} else {
+		at := a.viewStart + waveTime(x, w, length)
+		if y >= rulerHeight && drag.kind != waveSelectStart && drag.kind != waveSelectEnd &&
+			(at < a.selection.Start || at >= a.selection.End) {
+			a.selection = timeline.Span{}
+		}
+		if at != a.position {
+			a.seek(at)
 		}
 	}
 	a.scheduleRecovery()
 	*drag = waveGesture{}
 }
 
-func (a *app) cancelWave() {
+func (a *app) updateWaveDrag(now time.Time, item *asset, x, w float32, length int64, pressed bool) {
 	drag := &a.waveDrag
-	a.selection = drag.selection
-	a.viewStart = drag.viewStart
-	a.seek(drag.position)
-	drag.kind = waveCanceled
+	duration := item.info.Duration
+	at := a.viewStart + waveTime(x, w, length)
+	target := at + drag.offset
+	if x < 0 || x > w {
+		target = at
+	}
+	switch drag.kind {
+	case wavePlayhead, waveScrub:
+		a.position = max(0, min(duration, target))
+		if a.position != drag.end && (!pressed || drag.lastSeek.IsZero() || now.Sub(drag.lastSeek) >= seekInterval) {
+			a.seek(a.position)
+			drag.lastSeek, drag.end = now, a.position
+		}
+	case waveBoundary:
+		delta := int64(math.Round(float64(x-drag.x) / float64(w) * float64(length)))
+		drag.end = max(drag.min, min(drag.max, drag.at+delta))
+		if !pressed && drag.end != drag.at {
+			item.history.Edit(timeline.Span{Start: min(drag.at, drag.end), End: max(drag.at, drag.end)},
+				(drag.end > drag.at) == drag.leftKeep)
+			a.markProject()
+			a.seek(drag.end)
+		}
+	case waveLocate:
+		drag.draft = timeline.Span{Start: min(drag.at, at), End: max(drag.at, at)}
+	case waveSelectStart:
+		drag.draft = timeline.Span{Start: max(0, min(target, drag.selection.End-1)), End: drag.selection.End}
+	case waveSelectEnd:
+		drag.draft = timeline.Span{Start: drag.selection.Start, End: min(duration, max(target, drag.selection.Start+1))}
+	case waveSelectMove:
+		size := drag.selection.End - drag.selection.Start
+		// Keep the press offset even when the pointer goes beyond the viewport.
+		pointer := a.viewStart + int64(math.Round(float64(x)/float64(w)*float64(length)))
+		start := max(0, min(duration-size, drag.selection.Start+pointer-drag.at))
+		drag.draft = timeline.Span{Start: start, End: start + size}
+	}
+	if !pressed && drag.draft.End > drag.draft.Start {
+		a.selection = drag.draft
+	}
 }
 
-func waveHit(clips []timeline.Clip, span timeline.Span, position int64, w, x, y float32, at int64) (waveDragKind, int) {
-	if y >= rulerHeight && y < rulerHeight+handleHeight {
+func (a *app) cancelWave() {
+	drag := &a.waveDrag
+	a.viewStart = drag.viewStart
+	if a.position != drag.position || (drag.kind == wavePlayhead || drag.kind == waveScrub) && drag.end != drag.position {
+		a.seek(drag.position)
+	}
+	a.scheduleRecovery()
+	*drag = waveGesture{}
+}
+
+func waveHit(clips []timeline.Clip, span, selection timeline.Span, position int64, w, x, y float32, at int64) (waveDragKind, int) {
+	r := ui.Rect{W: w}
+	playhead := position >= span.Start && position <= span.End && math.Abs(float64(x-playheadX(r, span, position))) <= hitRadius
+	if y < rulerHeight {
+		if playhead {
+			return wavePlayhead, -1
+		}
+		return waveScrub, -1
+	}
+	if y < rulerHeight+handleHeight {
 		tolerance := int64(math.Ceil(float64(span.End-span.Start) * hitRadius / float64(w)))
 		if boundary := nearestBoundary(clips, at, tolerance); boundary >= 0 &&
 			clips[boundary].End > span.Start && clips[boundary].End < span.End &&
-			math.Abs(float64(x-timeX(ui.Rect{W: w}, span, clips[boundary].End))) <= hitRadius {
+			math.Abs(float64(x-timeX(r, span, clips[boundary].End))) <= hitRadius {
 			return waveBoundary, boundary
 		}
 	}
-	if position >= span.Start && position <= span.End &&
-		math.Abs(float64(x-playheadX(ui.Rect{W: w}, span, position))) <= hitRadius {
+	if selection.End > selection.Start && selection.End > span.Start && selection.Start < span.End {
+		best := float64(hitRadius)
+		kind := waveIdle
+		for i, edge := range [...]int64{selection.Start, selection.End} {
+			if edge >= span.Start && edge <= span.End {
+				distance := math.Abs(float64(x - selectionGripX(r, span, selection, i == 0)))
+				if distance <= best {
+					best = distance
+					kind = waveSelectStart + waveDragKind(i)
+				}
+			}
+		}
+		if kind != waveIdle {
+			return kind, -1
+		}
+		if at >= selection.Start && at < selection.End {
+			return waveSelectMove, -1
+		}
+	}
+	if playhead {
 		return wavePlayhead, -1
 	}
 	return waveLocate, -1
+}
+
+func waveTime(x, width float32, length int64) int64 {
+	return int64(math.Round(float64(max(0, min(x, width))) / float64(width) * float64(length)))
 }
 
 func nearestBoundary(clips []timeline.Clip, at, tolerance int64) int {
@@ -535,6 +636,21 @@ func nearestBoundary(clips []timeline.Clip, at, tolerance int64) int {
 
 func timeX(r ui.Rect, span timeline.Span, at int64) float32 {
 	return r.X + r.W*float32(float64(at-span.Start)/float64(span.End-span.Start))
+}
+
+func selectionGripX(r ui.Rect, span, selection timeline.Span, start bool) float32 {
+	left, right := timeX(r, span, selection.Start), timeX(r, span, selection.End)
+	inset := float32(selectionGrip) / 2
+	if selection.Start >= span.Start && selection.End <= span.End && right-left < selectionGrip {
+		// Keep both ends reachable when the selected time fits inside one pixel.
+		left = max(r.X+inset, min(r.X+r.W-inset-selectionGrip, (left+right-selectionGrip)/2))
+		right = left + selectionGrip
+	}
+	x := right
+	if start {
+		x = left
+	}
+	return max(r.X+inset, min(r.X+r.W-inset, x))
 }
 
 func (a *app) drawWave(p *ui.Painter, r ui.Rect, item *asset, length int64) {
@@ -571,17 +687,26 @@ func (a *app) drawWave(p *ui.Painter, r ui.Rect, item *asset, length int64) {
 		return waveKeptInk
 	})
 	p.StrokePath(removed.Cap(ui.ButtCap).Dash(0, 4, 3), 1, waveSelection.Alpha(.55))
-	if selected, ok := a.editSpan(); ok && selected.End > span.Start && selected.Start < span.End {
-		left := timeX(body, span, max(selected.Start, span.Start))
-		right := timeX(body, span, min(selected.End, span.End))
-		p.Stroke(ui.Rect{X: left, Y: body.Y, W: right - left, H: body.H}, waveSelection, 0, 1.5)
-	}
 	for i := clipAt(clips, span.Start); i+1 < len(clips) && clips[i].End < span.End; i++ {
 		x := timeX(body, span, clips[i].End)
 		p.Line(x, body.Y, x, body.Y+body.H, 1, waveSelection.Alpha(.25))
 		p.Fill(ui.Rect{X: x - 1, Y: body.Y + 2, W: 2, H: 6}, waveSelection.Alpha(.72), 1)
 	}
-	if a.waveDrag.kind == waveBoundary {
+	selected, ok := a.timelineSelection(item)
+	if drag := a.waveDrag; drag.moved && (drag.kind == waveLocate || drag.kind >= waveSelectStart && drag.kind <= waveSelectMove) {
+		selected, ok = drag.draft, drag.draft.End > drag.draft.Start
+	}
+	if ok {
+		drawWaveSelection(p, body, span, selected)
+	} else if i := clipAt(clips, min(a.position, item.info.Duration-1)); i < len(clips) {
+		clip := clips[i]
+		if clip.End > span.Start && clip.Start < span.End {
+			left := timeX(body, span, max(clip.Start, span.Start))
+			right := timeX(body, span, min(clip.End, span.End))
+			p.Stroke(ui.Rect{X: left, Y: body.Y, W: right - left, H: body.H}, waveSelection.Alpha(.35), 0, 1)
+		}
+	}
+	if a.waveDrag.kind == waveBoundary && a.waveDrag.moved {
 		x := playheadX(body, span, a.waveDrag.end)
 		p.Line(x, body.Y, x, body.Y+body.H, 2, waveSelection)
 		labelX := max(r.X+4, min(x+6, r.X+r.W-92))
@@ -589,6 +714,26 @@ func (a *app) drawWave(p *ui.Painter, r ui.Rect, item *asset, length int64) {
 		p.Text(labelX, r.Y+1, clock(a.waveDrag.end), 11, waveSelection)
 	}
 	drawPlayhead(p, r, span, a.position, true)
+}
+
+func drawWaveSelection(p *ui.Painter, body ui.Rect, span, selection timeline.Span) {
+	if selection.End <= span.Start || selection.Start >= span.End {
+		return
+	}
+	left := timeX(body, span, max(selection.Start, span.Start))
+	right := timeX(body, span, min(selection.End, span.End))
+	p.Fill(ui.Rect{X: left, Y: body.Y, W: right - left, H: body.H}, waveSelection.Alpha(.14), 0)
+	p.Line(left, body.Y+1, right, body.Y+1, 1.5, waveSelection)
+	p.Line(left, body.Y+body.H-1, right, body.Y+body.H-1, 1.5, waveSelection)
+	for i, edge := range [...]int64{selection.Start, selection.End} {
+		if edge < span.Start || edge > span.End {
+			continue
+		}
+		x := playheadX(body, span, edge)
+		p.Line(x, body.Y, x, body.Y+body.H, 1.5, waveSelection)
+		grip := selectionGripX(body, span, selection, i == 0)
+		p.Fill(ui.Rect{X: grip - selectionGrip/2, Y: body.Y + body.H/2 - 8, W: selectionGrip, H: 16}, waveSelection, 1)
+	}
 }
 
 func drawTimeRuler(p *ui.Painter, r ui.Rect, span timeline.Span) {
@@ -693,11 +838,12 @@ func playheadX(r ui.Rect, span timeline.Span, at int64) float32 {
 }
 
 func (a *app) overview(c *ui.Context, item *asset, duration int64, allowed bool) {
+	var overviewHandle ui.Handle
 	e := ui.Box(c.Key("overview")).Height(28).Shrink(0).Radius(controlRadius).Background(waveBack).
 		BorderColor(border).BorderWidth(1).Clip().Focusable().FocusRing(true).
-		Label("全局波形").Description("点击定位，拖动窗口浏览")
+		Label("全局波形").Description("点击定位，拖动窗口浏览").Bind(&overviewHandle)
 	length := a.detailLength(duration)
-	if allowed {
+	if allowed && !a.overviewDrag.active {
 		pan := func(delta int64) {
 			a.viewStart = max(0, min(duration-length, a.viewStart+delta))
 			a.scheduleRecovery()
@@ -705,45 +851,56 @@ func (a *app) overview(c *ui.Context, item *asset, duration int64, allowed bool)
 		e.OnShortcut(0, ui.KeyLeft, func() { pan(-length / 4) })
 		e.OnShortcut(0, ui.KeyRight, func() { pan(length / 4) })
 	}
-	x, _, _ := e.PointerPosition()
+	x, _, over := e.PointerPosition()
 	w := e.Bounds().W
-	if allowed && w > 0 {
-		at := int64(float64(x/w) * float64(duration))
+	e.HandleInput(func(ev ui.InputEvent) bool {
+		if a.selected != item || ev.Button != 0 {
+			return false
+		}
+		w := overviewHandle.Bounds(c).W
+		length := a.detailLength(duration)
+		switch ev.Kind {
+		case ui.InputPointerDown:
+			if a.busy() || w <= 0 || a.waveDrag.kind != waveIdle || a.overviewDrag.active {
+				return false
+			}
+			a.stopPlayback()
+			at := waveTime(ev.X, w, duration)
+			offset := length / 2
+			if at >= a.viewStart && at <= a.viewStart+length {
+				offset = at - a.viewStart
+			}
+			a.overviewDrag = overviewGesture{active: true, x: ev.X, viewStart: a.viewStart, offset: offset}
+			return true
+		case ui.InputPointerMove:
+			if a.overviewDrag.active && !a.busy() && w > 0 {
+				return a.trackOverview(ev.X, waveTime(ev.X, w, duration), duration, length)
+			}
+		case ui.InputPointerUp:
+			if !a.overviewDrag.active {
+				return false
+			}
+			if ev.Canceled || a.busy() || w <= 0 {
+				a.cancelOverview()
+			} else {
+				a.finishOverview(ev.X, w, duration, length)
+			}
+			return true
+		}
+		return false
+	})
+	if !allowed && a.overviewDrag.active {
+		a.cancelOverview()
+	} else if allowed && w > 0 && (over || a.overviewDrag.active) && a.waveDrag.kind == waveIdle {
+		at := waveTime(x, w, duration)
 		switch {
-		case a.overviewDrag.active && length < duration:
+		case length < duration && a.overviewDrag.moved:
 			e.Cursor(ui.CursorGrabbing)
 		case length < duration && at >= a.viewStart && at <= a.viewStart+length:
 			e.Cursor(ui.CursorGrab)
 		default:
 			e.Cursor(ui.CursorCrosshair)
 		}
-	}
-	if _, _, pressed := e.Dragged(); pressed && allowed && w > 0 {
-		at := int64(float64(max(0, min(x/w, 1))) * float64(duration))
-		if !a.overviewDrag.active {
-			a.stopPlayback()
-			inside := at >= a.viewStart && at <= a.viewStart+length
-			a.overviewDrag = overviewGesture{active: true, offset: at - a.viewStart, at: at, x: x, pendingClick: inside}
-			if !inside || length == duration {
-				a.overviewDrag.offset = length / 2
-				a.overviewDrag.pendingClick = false
-				a.selection = timeline.Span{}
-				a.seek(at)
-			}
-		}
-		if math.Abs(float64(x-a.overviewDrag.x)) >= 3 {
-			a.overviewDrag.pendingClick = false
-		}
-		if !a.overviewDrag.pendingClick {
-			a.viewStart = max(0, min(duration-length, at-a.overviewDrag.offset))
-			a.scheduleRecovery()
-		}
-	} else {
-		if allowed && a.overviewDrag.pendingClick {
-			a.selection = timeline.Span{}
-			a.seek(a.overviewDrag.at)
-		}
-		a.overviewDrag = overviewGesture{}
 	}
 	e.Draw(func(p *ui.Painter, r ui.Rect) {
 		span := timeline.Span{End: duration}
@@ -756,4 +913,36 @@ func (a *app) overview(c *ui.Context, item *asset, duration int64, allowed bool)
 		drawPlayhead(p, r, span, a.position, false)
 		p.Stroke(window, waveSelection, 2, 1)
 	})
+}
+
+func (a *app) trackOverview(x float32, at, duration, length int64) bool {
+	drag := &a.overviewDrag
+	if !drag.active {
+		return false
+	}
+	if math.Abs(float64(x-drag.x)) >= waveDragSlop {
+		drag.moved = true
+	}
+	if drag.moved {
+		a.viewStart = max(0, min(duration-length, at-drag.offset))
+	}
+	return drag.moved
+}
+
+func (a *app) finishOverview(x, w float32, duration, length int64) {
+	at := waveTime(x, w, duration)
+	if !a.trackOverview(x, at, duration, length) {
+		if at < a.viewStart || at > a.viewStart+length {
+			a.viewStart = max(0, min(duration-length, at-length/2))
+		}
+		a.seek(at)
+	}
+	a.overviewDrag = overviewGesture{}
+	a.scheduleRecovery()
+}
+
+func (a *app) cancelOverview() {
+	a.viewStart = a.overviewDrag.viewStart
+	a.overviewDrag = overviewGesture{}
+	a.scheduleRecovery()
 }

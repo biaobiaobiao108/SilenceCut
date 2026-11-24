@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"math"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"time"
@@ -74,8 +73,11 @@ func (a *app) view(c *ui.Context) {
 	if !narrow {
 		a.settingsOpen = false
 	}
-	if a.waveDrag.kind > waveIdle && a.waveDrag.kind < waveCanceled && c.Shortcut(0, ui.KeyEscape) {
+	if a.waveDrag.kind != waveIdle && c.Shortcut(0, ui.KeyEscape) {
 		a.cancelWave()
+	}
+	if a.overviewDrag.active && c.Shortcut(0, ui.KeyEscape) {
+		a.cancelOverview()
 	}
 	a.previewTick(c)
 	a.recoveryTick(c)
@@ -134,7 +136,7 @@ func (a *app) workspace(c *ui.Context, narrow, dragging bool) {
 func (a *app) toolbar(c *ui.Context, narrow bool) {
 	bar := c.TitleBar()
 	exportButton := func() {
-		primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(), a.chooseExport).
+		exportAction(c.Key("export-media"), !a.busy() && a.canExport(), a.chooseExport).
 			Label("导出合并媒体").Description("每个素材导出一个文件，只拼接保留片段")
 	}
 	topbar := ui.Row(c.Key("topbar")).Absolute().Top(0).Left(0).Right(0).Height(topBarHeight).
@@ -143,12 +145,8 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 		ui.Row(c.Key("topbar-project")).Width(sideWidth).Shrink(0).Height(topBarHeight).
 			Padding(0, railInset, 0, float32(workspaceInset)+bar.Left).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Image(c, appIcon).Size(22, 22).Shrink(0)
-			if name := a.projectName(); name != "" {
-				ui.Text(c, name).FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
-			} else {
-				ui.Spacer(c).Grow(1)
-			}
 			if a.projectDirty {
+				ui.Spacer(c).Grow(1)
 				ui.Text(c, "未保存").FontSize(11).TextColor(subtle).Shrink(0)
 			}
 		})
@@ -193,16 +191,6 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 				Padding(0, railInset, 0, railInset).AlignItems(ui.Center).Children(exportButton)
 		}
 	})
-}
-
-func (a *app) projectName() string {
-	if a.projectPath != "" {
-		return filepath.Base(a.projectPath)
-	}
-	if len(a.assets) > 0 {
-		return "未命名项目"
-	}
-	return ""
 }
 
 func (a *app) dropOverlay(c *ui.Context) {
@@ -563,7 +551,7 @@ func (a *app) edit(keep bool) {
 }
 
 func (a *app) history(redo bool) {
-	if a.selected == nil || a.busy() {
+	if a.selected == nil || a.busy() || a.waveDrag.kind != waveIdle || a.overviewDrag.active {
 		return
 	}
 	a.stopPlayback()

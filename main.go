@@ -716,7 +716,7 @@ func (a *app) seek(position int64) {
 }
 
 func (a *app) togglePlay() {
-	if a.busy() || a.waveDrag.kind != waveIdle || a.selected == nil || a.selected.offline ||
+	if a.busy() || a.waveDrag.kind != waveIdle || a.overviewDrag.active || a.selected == nil || a.selected.offline ||
 		a.player == nil || a.video != nil && !a.video.Ready() {
 		return
 	}
