@@ -48,6 +48,18 @@ func TestLongWaveformNavigation(t *testing.T) {
 	if wave.W == 0 || overview.W == 0 || a.detailLength(duration) != 30*timeline.Second {
 		t.Fatalf("initial timeline = %v %v, %d µs", wave, overview, a.detailLength(duration))
 	}
+	a.viewStart = 5 * timeline.Second
+	view.Frame()
+	view.Wheel(wave.X+wave.W/2, wave.Y+wave.H/2, 90, 0)
+	if a.viewStart <= 5*timeline.Second {
+		t.Fatalf("horizontal wheel did not move the view forward: %d µs", a.viewStart)
+	}
+	forward := a.viewStart
+	view.Wheel(wave.X+wave.W/2, wave.Y+wave.H/2, -45, 0)
+	if a.viewStart >= forward {
+		t.Fatalf("horizontal wheel did not move the view back: %d µs", a.viewStart)
+	}
+	a.viewStart = 0
 	near := func(got, want, tolerance int64) {
 		t.Helper()
 		if got < want-tolerance || got > want+tolerance {
@@ -153,6 +165,9 @@ func TestWorkspaceLayoutAndEdits(t *testing.T) {
 			view := ui.NewTester(a.view, size[0], size[1])
 			if !view.HasText("拖入音视频") {
 				t.Fatal("empty workspace lacks its drop target")
+			}
+			if view.HasText("就绪") {
+				t.Fatal("idle workspace still reserves a status bar")
 			}
 			if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
 				saveView(t, view, filepath.Join(folder, fmt.Sprintf("empty-%d.png", size[0])))
@@ -274,6 +289,33 @@ func TestTopbarClearsNativeWindowControls(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
+	const width, height = 1600, 900
+	item := &asset{name: "项目旁白.wav", info: media.Info{Duration: 5 * timeline.Second}}
+	projectPath := filepath.Join(t.TempDir(), "一个非常长的项目名称用于检查顶栏项目区不会挤过分界线.silencecut")
+	a := &app{
+		assets: []*asset{item}, selected: item, projectPath: projectPath, projectDirty: true,
+		opts: filterOptions{preset: "慢"},
+	}
+	view := ui.NewTester(a.view, width, height)
+	project, ok := view.Find(filepath.Base(projectPath))
+	if !ok || project.X+project.W > sideWidth {
+		t.Fatalf("project name crosses the material rail: %+v", project)
+	}
+	for _, label := range []string{"打开项目", "保存项目"} {
+		r, ok := view.Find(label)
+		if !ok || r.X < sideWidth+1 {
+			t.Fatalf("%s is not fully inside the editor column: %+v", label, r)
+		}
+	}
+	for _, label := range []string{"导出切片", "导出合并媒体"} {
+		r, ok := view.Find(label)
+		if !ok || r.X+r.W > width-settingsWidth-1 {
+			t.Fatalf("%s crosses the inspector divider: %+v", label, r)
+		}
 	}
 }
 

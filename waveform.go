@@ -83,6 +83,26 @@ func (a *app) setZoom(length int64) {
 	a.scheduleRecovery()
 }
 
+func (a *app) panWave(dx float32, duration, length int64, width float32) bool {
+	if dx == 0 || width <= 0 || length >= duration {
+		return false
+	}
+	delta := int64(math.Round(float64(length) * float64(dx) / float64(width)))
+	if delta == 0 {
+		delta = 1
+		if dx < 0 {
+			delta = -1
+		}
+	}
+	next := max(0, min(duration-length, a.viewStart+delta))
+	if next == a.viewStart {
+		return true
+	}
+	a.viewStart = next
+	a.scheduleRecovery()
+	return true
+}
+
 func clipAt(clips []timeline.Clip, at int64) int {
 	return sort.Search(len(clips), func(i int) bool { return clips[i].End > at })
 }
@@ -245,7 +265,7 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	e := ui.Box(c.Key("wave")).Grow(1).MinHeight(112).Radius(surfaceRadius).Background(waveBack).
 		BorderColor(border).BorderWidth(1).Clip().
 		Focusable().FocusRing(true).Label("音频波形和播放位置").
-		Description("用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点")
+		Description("横向滚动波形平移视图；用左右方向键移动播放游标；Alt 加左右方向键调整当前片段起点，Alt+Shift 调整终点")
 	clips := item.history.Clips
 	if i := clipAt(clips, a.position); i < len(clips) {
 		kind := "移除片段"
@@ -273,6 +293,16 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	length := a.detailLength(duration)
 	x, y, over := e.PointerPosition()
 	w := e.Bounds().W
+	e.HandleInput(func(ev ui.InputEvent) bool {
+		if ev.Kind != ui.InputScroll || !allowed {
+			return false
+		}
+		dx := ev.DX
+		if dx == 0 && ev.Mods&ui.Shift != 0 {
+			dx = ev.DY
+		}
+		return a.panWave(dx, duration, length, w)
+	})
 	_, _, pressed := e.Dragged()
 	if w > 0 {
 		a.handleWave(c, e, item, w, x, y, length, over, pressed, allowed)

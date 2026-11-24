@@ -26,7 +26,6 @@ const (
 	surfaceRadius    = 12
 	overlayRadius    = 16
 	topBarHeight     = 46
-	statusHeight     = 36
 	wideWorkspace    = 1120
 	hoverDuration    = 100 * time.Millisecond
 	switchDuration   = 160 * time.Millisecond
@@ -108,7 +107,6 @@ func (a *app) view(c *ui.Context) {
 	}
 	root.Children(func() {
 		a.workspace(c, narrow, dragging && !a.busy())
-		a.footer(c)
 		a.toolbar(c, narrow)
 		if dragging && !a.busy() {
 			a.dropOverlay(c)
@@ -137,63 +135,75 @@ func (a *app) workspace(c *ui.Context, narrow, dragging bool) {
 
 func (a *app) toolbar(c *ui.Context, narrow bool) {
 	bar := c.TitleBar()
-	left := float32(workspaceInset) + bar.Left
-	right := float32(workspaceInset) + bar.Right
-	ui.Row(c.Key("topbar")).Absolute().Top(0).Left(0).Right(0).Height(topBarHeight).
-		Padding(0, right, 0, left).Gap(8).AlignItems(ui.Center).DragWindow().Children(func() {
-		ui.Image(c, appIcon).Size(22, 22).Shrink(0)
-		name := a.projectName()
-		label := ui.Text(c, name).FontSize(14).FontWeight(600).SingleLine().Ellipsis("…").MaxWidth(240)
-		if a.projectPath != "" {
-			label.Tooltip(a.projectPath)
-		}
-		if a.projectDirty {
-			ui.Text(c, "未保存").FontSize(11).TextColor(subtle).Shrink(0)
-		}
-		ui.Row(c).Gap(1).Shrink(0).Children(func() {
-			iconButton(c.Key("project-open"), iconOpen, "打开项目", "打开项目（Ctrl/Cmd+Shift+O）", !a.busy(), false, a.chooseOpenProject)
-			iconButton(c.Key("project-save"), iconSave, "保存项目", "保存项目（Ctrl/Cmd+S）",
-				!a.busy() && (a.projectDirty || a.projectPath != "" || len(a.assets) > 0),
-				false, func() { a.chooseSaveProject(nil) })
+	topbar := ui.Row(c.Key("topbar")).Absolute().Top(0).Left(0).Right(0).Height(topBarHeight).
+		AlignItems(ui.Stretch).DragWindow()
+	topbar.Children(func() {
+		ui.Row(c.Key("topbar-project")).Width(sideWidth).Shrink(0).Height(topBarHeight).
+			Padding(0, railInset, 0, float32(workspaceInset)+bar.Left).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Image(c, appIcon).Size(22, 22).Shrink(0)
+			name := a.projectName()
+			label := ui.Text(c, name).FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
+			if a.projectPath != "" {
+				label.Tooltip(a.projectPath)
+			}
+			if a.projectDirty {
+				ui.Text(c, "未保存").FontSize(11).TextColor(subtle).Shrink(0)
+			}
 		})
-		ui.Spacer(c)
-		if narrow && !a.focusMode {
-			button := iconButton(c.Key("settings-button"), iconSliders, "过滤设置", "过滤设置", true, a.settingsOpen,
-				func() { a.settingsOpen = !a.settingsOpen }).AccessSelected(a.settingsOpen)
-			if a.settingsOpen {
-				button.Background(raised)
-			}
-			button.HasPopup(ui.PopupDialog).Expanded(a.settingsOpen)
-			open := a.settingsOpen
-			ui.Overlay(c, func() {}) // Keep the overlay parent alive for the exit animation.
-			ui.PopoverBase(c.Key("settings-popover"), button, &a.settingsOpen, func(panel ui.Element) {
-				panel.AttachTo(button, ui.AnchorBottomEnd, ui.AnchorTopEnd).Width(settingsWidth).
-					Radius(surfaceRadius).BorderColor(border).BorderWidth(1).Focusable().AutoFocus().Label("过滤设置").
-					Transition(reveal(c, &ui.Motion{Y: -4, Flip: true}, true))
-				a.controls(c, panel, settingsWidth, railInset)
+		right := float32(workspaceInset) + bar.Right
+		if !narrow && !a.focusMode {
+			right = railInset
+		}
+		ui.Row(c.Key("topbar-command")).Grow(1).MinWidth(0).Height(topBarHeight).
+			Padding(0, right, 0, railInset).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Row(c).Gap(1).Shrink(0).Children(func() {
+				iconButton(c.Key("project-open"), iconOpen, "打开项目", "打开项目（Ctrl/Cmd+Shift+O）", !a.busy(), false, a.chooseOpenProject)
+				iconButton(c.Key("project-save"), iconSave, "保存项目", "保存项目（Ctrl/Cmd+S）",
+					!a.busy() && (a.projectDirty || a.projectPath != "" || len(a.assets) > 0),
+					false, func() { a.chooseSaveProject(nil) })
 			})
-			if open && !a.settingsOpen {
-				button.Focus()
+			ui.Spacer(c)
+			if narrow && !a.focusMode {
+				button := iconButton(c.Key("settings-button"), iconSliders, "过滤设置", "过滤设置", true, a.settingsOpen,
+					func() { a.settingsOpen = !a.settingsOpen }).AccessSelected(a.settingsOpen)
+				if a.settingsOpen {
+					button.Background(raised)
+				}
+				button.HasPopup(ui.PopupDialog).Expanded(a.settingsOpen)
+				open := a.settingsOpen
+				ui.Overlay(c, func() {}) // Keep the overlay parent alive for the exit animation.
+				ui.PopoverBase(c.Key("settings-popover"), button, &a.settingsOpen, func(panel ui.Element) {
+					panel.AttachTo(button, ui.AnchorBottomEnd, ui.AnchorTopEnd).Width(settingsWidth).
+						Radius(surfaceRadius).BorderColor(border).BorderWidth(1).Focusable().AutoFocus().Label("过滤设置").
+						Transition(reveal(c, &ui.Motion{Y: -4, Flip: true}, true))
+					a.controls(c, panel, settingsWidth, railInset)
+				})
+				if open && !a.settingsOpen {
+					button.Focus()
+				}
 			}
-		}
-		focusHint := "隐藏两侧面板"
-		if a.focusMode {
-			focusHint = "显示两侧面板"
-		}
-		focusButton := iconButton(c.Key("focus-mode"), iconFocus, "专注模式", focusHint, true, a.focusMode, func() {
-			a.focusMode = !a.focusMode
-			a.focusAt = c.Now()
+			focusHint := "隐藏两侧面板"
 			if a.focusMode {
-				a.settingsOpen = false
+				focusHint = "显示两侧面板"
 			}
-		}).AccessSelected(a.focusMode)
-		if a.focusMode {
-			focusButton.Background(raised)
+			focusButton := iconButton(c.Key("focus-mode"), iconFocus, "专注模式", focusHint, true, a.focusMode, func() {
+				a.focusMode = !a.focusMode
+				a.focusAt = c.Now()
+				if a.focusMode {
+					a.settingsOpen = false
+				}
+			}).AccessSelected(a.focusMode)
+			if a.focusMode {
+				focusButton.Background(raised)
+			}
+			textAction(c.Key("export-clips"), "导出切片", !a.busy() && a.canExport(true), func() { a.chooseExport(true) }).
+				Tooltip("将素材的各段导出为独立文件")
+			primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(false), func() { a.chooseExport(false) }).
+				Label("导出合并媒体").Tooltip("每个素材导出一个文件，只拼接保留片段")
+		})
+		if !narrow && !a.focusMode {
+			ui.Box(c.Key("topbar-inspector")).Width(settingsWidth + 1).Shrink(0)
 		}
-		textAction(c.Key("export-clips"), "导出切片", !a.busy() && a.canExport(true), func() { a.chooseExport(true) }).
-			Tooltip("将素材的各段导出为独立文件")
-		primaryAction(c.Key("export-media"), "导出成片", !a.busy() && a.canExport(false), func() { a.chooseExport(false) }).
-			Label("导出合并媒体").Tooltip("每个素材导出一个文件，只拼接保留片段")
 	})
 }
 
@@ -306,6 +316,7 @@ func (a *app) editor(c *ui.Context, dragging bool) {
 		editor.Transition(ui.ElementTransition{Duration: revealDuration, Width: true, Position: true})
 	}
 	editor.Children(func() {
+		a.activity(c)
 		if item == nil {
 			a.emptyEditor(c, dragging)
 			return
@@ -532,11 +543,11 @@ func (a *app) history(redo bool) {
 	a.markProject()
 }
 
-func (a *app) footer(c *ui.Context) {
-	footer := ui.Row(c.Key("statusbar")).AlignItems(ui.Center).Gap(10).Shrink(0).Height(statusHeight).
-		Padding(0, workspaceInset).Background(rail)
-	footer.Draw(func(p *ui.Painter, r ui.Rect) { p.Line(r.X, r.Y, r.X+r.W, r.Y, 1, border.Alpha(.7)) })
-	footer.Children(func() {
+func (a *app) activity(c *ui.Context) {
+	if a.cancel == nil && a.status == "" && a.publishedDir == "" {
+		return
+	}
+	ui.Row(c.Key("activity")).AlignItems(ui.Center).Gap(8).Shrink(0).Height(controlHeight).Children(func() {
 		if a.cancel != nil {
 			job := "正在" + a.job
 			if a.canceling {
@@ -548,15 +559,11 @@ func (a *app) footer(c *ui.Context) {
 			textAction(c.Key("cancel"), "取消", !a.canceling, a.cancelJob)
 			return
 		}
-		status, color := a.status, muted
-		if status == "" {
-			status, color = "就绪", subtle
-		}
-		ui.Text(c.Key("job-status"), status).Grow(1).FontSize(12).TextColor(color).
-			SingleLine().Ellipsis("…").Tooltip(a.status).Role(ui.RoleStatus)
-		if a.selection.End > a.selection.Start {
-			ui.Text(c, "选区 "+clock(a.selection.Start)+" – "+clock(a.selection.End)).
-				FontFeatures("tnum").FontSize(12).TextColor(muted)
+		if a.status != "" {
+			ui.Text(c.Key("job-status"), a.status).Grow(1).FontSize(12).TextColor(muted).
+				SingleLine().Ellipsis("…").Tooltip(a.status).Role(ui.RoleStatus)
+		} else {
+			ui.Spacer(c).Grow(1)
 		}
 		if a.publishedDir != "" {
 			textAction(c.Key("output-folder"), "打开导出文件夹", true, func() {
