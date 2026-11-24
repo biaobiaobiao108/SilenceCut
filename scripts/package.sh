@@ -14,7 +14,7 @@ copy_notice() {
 }
 
 case "$(uname -s)" in
-  MINGW*|MSYS*)
+  MINGW*|MSYS*|UCRT*)
     sdk="$work/mingw32-x86_64"
     bundle="$dest/SilenceCut-windows-x64"
     mkdir -p "$bundle/Notices/FFmpeg"

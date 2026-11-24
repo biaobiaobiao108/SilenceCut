@@ -1,0 +1,62 @@
+name: Package
+
+on:
+  push:
+    tags: ['**']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows amd64
+    if: github.event.created && !github.event.deleted
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: >-
+            curl make patch
+            mingw-w64-ucrt-x86_64-gcc
+      - name: Build Windows package
+        shell: msys2 {0}
+        run: |
+          set -eu
+          sh scripts/build-ffmpeg.sh
+          sh scripts/package.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/SilenceCut-windows-x64.zip
+          archive: false
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64
+    if: github.event.created && !github.event.deleted
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build macOS package
+        run: |
+          sh scripts/build-ffmpeg.sh
+          sh scripts/package.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/SilenceCut-macos-arm64.zip
+          archive: false
+          if-no-files-found: error

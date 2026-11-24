@@ -7,7 +7,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 work=${SILENCECUT_FFMPEG_WORK:-"$root/.ffmpeg"}
 host=$(uname -s)
 case "$host" in
-  MINGW*|MSYS*)
+  MINGW*|MSYS*|UCRT*)
     arch=x86_64
     target=mingw32
     platform_flags='--enable-mediafoundation --enable-d3d11va --disable-d3d12va --disable-dxva2'

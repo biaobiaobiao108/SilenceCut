@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows amd64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: >-
+            curl make patch
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ffmpeg
+      - name: Enable Media Foundation
+        shell: powershell
+        run: |
+          if (-not (Get-WindowsFeature Server-Media-Foundation).Installed) {
+            Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
+          }
+      - name: Build FFmpeg SDK and check Go code
+        shell: msys2 {0}
+        run: |
+          set -eu
+          sh scripts/build-ffmpeg.sh
+          sdk=$(cygpath -m "$PWD/.ffmpeg/mingw32-x86_64")
+          export PATH="$PWD/.ffmpeg/mingw32-x86_64/bin:$PATH"
+          export CGO_ENABLED=1
+          export CGO_CFLAGS="'-I$sdk/include'"
+          export CGO_LDFLAGS="'-L$sdk/lib'"
+          go test -tags mygo_nowebview ./...
+          go vet -tags mygo_nowebview ./...
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install FFmpeg tools for integration tests
+        run: brew install ffmpeg
+      - name: Build FFmpeg SDK and check Go code
+        run: |
+          sh scripts/build-ffmpeg.sh
+          sdk="$PWD/.ffmpeg/darwin-arm64"
+          export CGO_ENABLED=1
+          export CGO_CFLAGS="'-I$sdk/include'"
+          export CGO_LDFLAGS="'-L$sdk/lib' '-Wl,-rpath,$sdk/lib'"
+          go test ./...
+          go vet ./...
