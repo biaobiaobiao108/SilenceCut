@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,38 @@ import (
 	"silencecut/internal/media"
 	"silencecut/internal/timeline"
 )
+
+func TestFilterRejectsSourceChangeBetweenPasses(t *testing.T) {
+	path := selectionExportFixture(t)
+	wav, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace the two-second fixture with one second after waveform analysis.
+	wav = wav[:44+48000*2]
+	binary.LittleEndian.PutUint32(wav[4:8], uint32(len(wav)-8))
+	binary.LittleEndian.PutUint32(wav[40:44], uint32(len(wav)-44))
+	item := asset{path: path}
+	opts := filterOptions{preset: "中等"}
+	replaced := false
+	err = item.filter(t.Context(), opts, func(progress float64) {
+		if progress == .45 && !replaced {
+			replaced = true
+			if err := os.WriteFile(path, wav, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if !replaced || err == nil || len(item.history.Clips) != 0 {
+		t.Fatalf("source replaced = %t, filter error = %v, published cuts = %v", replaced, err, item.history.Clips)
+	}
+	if err := item.filter(t.Context(), opts, func(float64) {}); err != nil {
+		t.Fatal(err)
+	}
+	if item.info.Duration != timeline.Second || !validProjectClips(item.history.Clips, item.info.Duration) {
+		t.Fatalf("retry returned duration %d and cuts %v", item.info.Duration, item.history.Clips)
+	}
+}
 
 func TestCloseWaitsForActiveJobBeforePrompting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -136,6 +169,30 @@ func TestProjectConcurrentSave(t *testing.T) {
 	}
 	if saved != 1 || conflicts != 1 {
 		t.Fatalf("concurrent saves: %d committed, %d conflicts", saved, conflicts)
+	}
+}
+
+func TestSameDirectoryProjectsCanSaveIndependently(t *testing.T) {
+	dir := t.TempDir()
+	firstPath, secondPath := filepath.Join(dir, "first.silencecut"), filepath.Join(dir, "second.silencecut")
+	first, second := &app{}, &app{}
+	if err := first.saveProject(firstPath, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.saveProject(secondPath, true); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockProjectSave(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	if err := first.saveProject(firstPath, false); !errors.Is(err, errProjectConflict) {
+		t.Fatalf("save while the same project is locked: %v", err)
+	}
+	if err := second.saveProject(secondPath, false); err != nil {
+		t.Fatalf("save while a different project is locked: %v", err)
 	}
 }
 

@@ -493,6 +493,21 @@ func TestVideoCut(t *testing.T) {
 			}
 		})
 	}
+	t.Run("sub-millisecond AAC", func(t *testing.T) {
+		spans := []timeline.Span{{Start: 500_000, End: 500_400}}
+		path, err := Export(t.Context(), source, dir, "short", spans, discardProgress)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pcm, err := exec.Command(ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", "-f", "s16le", "-").Output()
+		if err != nil {
+			t.Fatalf("decoding audio: %v", err)
+		}
+		// 400 microseconds round to 19 stereo samples at 48 kHz.
+		if len(pcm) != 19*2*2 {
+			t.Fatalf("decoded %d PCM bytes, want 76", len(pcm))
+		}
+	})
 }
 
 func TestH264ExportKeepsSourceSize(t *testing.T) {

@@ -421,23 +421,7 @@ func (a *app) filter(items []*asset) {
 			}
 			item := items[index]
 			update := func(value float64) { report((float64(index) + value) / float64(len(items))) }
-			var err error
-			var clips []timeline.Clip
-			stat, statErr := os.Stat(current.path)
-			if statErr != nil {
-				err = statErr
-			} else if current.info.Duration == 0 || changed(current.file, stat) {
-				current.info, current.peaks, err = media.Waveform(ctx, current.path, func(value float64) { update(value * .45) })
-				if err == nil {
-					current.waveform = timeline.BuildWaveform(current.peaks)
-					current.automatic = timeline.AutomaticThreshold(current.peaks)
-					current.file = stat
-				}
-			}
-			if err == nil {
-				current.settings, _ = opts.settings(current.automatic)
-				clips, err = media.Detect(ctx, current.path, current.settings, func(value float64) { update(.45 + value*.55) })
-			}
+			err := current.filter(ctx, opts, update)
 			if err != nil && ctx.Err() != nil {
 				break
 			}
@@ -451,7 +435,6 @@ func (a *app) filter(items []*asset) {
 				continue
 			}
 			succeeded++
-			current.history = timeline.History{Clips: clips}
 			a.win.Update(func() {
 				reload := item.info.Duration == 0 || item.offline || changed(item.file, current.file)
 				if reload {
@@ -462,7 +445,7 @@ func (a *app) filter(items []*asset) {
 				item.info, item.peaks, item.automatic = current.info, current.peaks, current.automatic
 				item.waveform = current.waveform
 				item.file, item.settings, item.history = current.file, current.settings, current.history
-				item.filtered, item.analyzing, item.issue, item.exportIssue = clips, false, "", ""
+				item.filtered, item.analyzing, item.issue, item.exportIssue = current.filtered, false, "", ""
 				item.offline = false
 				item.pendingLoad = false
 				a.markProject()
@@ -483,6 +466,41 @@ func (a *app) filter(items []*asset) {
 			a.end(status)
 		})
 	})
+}
+
+func (item *asset) filter(ctx context.Context, opts filterOptions, update media.Progress) error {
+	before, err := os.Stat(item.path)
+	if err != nil {
+		return err
+	}
+	if item.info.Duration == 0 || changed(item.file, before) {
+		info, peaks, err := media.Waveform(ctx, item.path, func(value float64) { update(value * .45) })
+		if err != nil {
+			return err
+		}
+		item.info, item.peaks = info, peaks
+		item.waveform = timeline.BuildWaveform(peaks)
+		item.automatic = timeline.AutomaticThreshold(peaks)
+	}
+	update(.45)
+	settings, err := opts.settings(item.automatic)
+	if err != nil {
+		return err
+	}
+	clips, err := media.Detect(ctx, item.path, settings, func(value float64) { update(.45 + value*.55) })
+	if err != nil {
+		return err
+	}
+	after, err := os.Stat(item.path)
+	if err != nil {
+		return err
+	}
+	if changed(before, after) || !validProjectClips(clips, item.info.Duration) {
+		return errors.New("素材在过滤期间已改变，请重新过滤")
+	}
+	item.file, item.settings, item.filtered = after, settings, clips
+	item.history = timeline.History{Clips: clips}
+	return nil
 }
 
 func batchStatus(action, completed string, succeeded, failed int, issue string, canceled bool) string {

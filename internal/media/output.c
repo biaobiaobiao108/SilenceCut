@@ -169,7 +169,13 @@ CutOutput *cut_create(CutInput *in, const char *path, int64_t duration, int *err
     }
     if (video) out->video_end = av_rescale_q(duration, AV_TIME_BASE_Q, out->video->time_base);
     if ((*err = add_audio(out, in, video)) < 0) goto fail;
-    if (!video) av_opt_set(out->format->priv_data, "rf64", "auto", 0);
+    if (video) {
+        // Millisecond movie ticks can round short AAC edit lists down to zero.
+        *err = av_opt_set_int(out->format->priv_data, "movie_timescale", AV_TIME_BASE, 0);
+        if (*err < 0) goto fail;
+    } else {
+        av_opt_set(out->format->priv_data, "rf64", "auto", 0);
+    }
     out->format->interrupt_callback = in->format->interrupt_callback;
     if ((*err = avio_open2(&out->format->pb, path, AVIO_FLAG_WRITE,
                            &out->format->interrupt_callback, NULL)) < 0) goto fail;
@@ -409,6 +415,7 @@ int cut_finish(CutOutput *out, int *video_error) {
         if (err < 0) return err;
     } while (err > 0);
     if ((err = write_audio(out, 1)) < 0) return err;
+    if (!out->audio_pts) return AVERROR_INVALIDDATA;
     if (out->video) {
         if (out->video_pts == AV_NOPTS_VALUE) return AVERROR_INVALIDDATA;
         if ((err = encode(out, out->video, out->video_stream, NULL, video_error)) < 0) return err;
