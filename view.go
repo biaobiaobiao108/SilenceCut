@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"math"
-	"os"
 	"slices"
 	"strconv"
 	"time"
@@ -73,7 +72,6 @@ func (a *app) view(c *ui.Context) {
 	}
 	a.previewTick(c)
 	a.recoveryTick(c)
-	a.warmChunkTick(c)
 	c.OnWindowShortcut(0, ui.KeySpace, a.togglePlay)
 	mod := ui.Cmd
 	c.OnWindowShortcut(mod, ui.KeyO, a.chooseFiles)
@@ -96,9 +94,6 @@ func (a *app) view(c *ui.Context) {
 		}
 	}
 	root.Children(func() {
-		if a.nextVideo != nil && (a.video != nil || a.buildingCut) {
-			ui.Video(c.Key("next-video"), a.nextVideo).Absolute().Size(1, 1).Opacity(0)
-		}
 		a.toolbar(c, narrow)
 		ui.Divider(c)
 		ui.Row(c).Grow(1).MinHeight(0).AlignItems(ui.Stretch).Children(func() {
@@ -247,40 +242,17 @@ func (a *app) editor(c *ui.Context) {
 }
 
 func (a *app) previewFeedback(c *ui.Context, item *asset) {
-	if a.previewIssue != "" {
-		ui.Column(c).Padding(railInset).Gap(8).Center().Children(func() {
-			ui.Text(c, a.previewIssue).FontSize(12).TextColor(waveRemovedInk).SingleLine().Ellipsis("…").Tooltip(a.previewIssue)
-			textAction(c.Key("retry-preview"), "重试预览", !a.busy(), func() {
-				a.closePreview()
-				if item.proxy != "" {
-					_ = os.Remove(item.proxy)
-				}
-				item.proxy = ""
-				a.openPreview(item, false)
-				a.primeFilteredVideo()
-			})
-		})
-	} else if a.buildingCut || a.videoCut == nil && a.chunkJob != nil {
-		ui.Column(c).Width(sideWidth).Gap(6).Center().Children(func() {
-			label := "正在准备过滤后试听"
-			if a.videoCut != nil {
-				label = "正在准备下一段"
-			} else if a.chunkJob != nil {
-				label = "正在准备首段试听"
-			}
-			ui.Textf(c, "%s · %.0f%%", label, a.previewProgress*100).
-				FontSize(12).TextColor(muted).Role(ui.RoleStatus)
-			ui.Progress(c, a.previewProgress).Width(sideWidth)
-		})
-	} else {
-		label := "正在准备预览…"
-		if !a.originalPreview && len(item.history.Clips) > 0 {
-			if _, ok := nextRetained(item.history.Clips, 0); !ok {
-				label = "无可试听的保留片段"
-			}
-		}
-		ui.Text(c, label).FontSize(12).TextColor(muted).Role(ui.RoleStatus)
+	if a.previewIssue == "" {
+		ui.Text(c, "正在打开原片…").FontSize(12).TextColor(muted).Role(ui.RoleStatus)
+		return
 	}
+	ui.Column(c).Padding(railInset).Gap(8).Center().Children(func() {
+		ui.Text(c, a.previewIssue).FontSize(12).TextColor(waveRemovedInk).SingleLine().Ellipsis("…").Tooltip(a.previewIssue)
+		textAction(c.Key("retry-preview"), "重试预览", !a.busy(), func() {
+			a.closePreview()
+			a.openPreview(item)
+		})
+	})
 }
 
 func (a *app) previewTick(c *ui.Context) {
@@ -290,33 +262,19 @@ func (a *app) previewTick(c *ui.Context) {
 			issue = err.Error()
 		} else if !a.video.Ready() {
 			if time.Since(a.previewSince) > 5*time.Second {
-				issue = "视频预览超时"
+				issue = "打开原片超时"
 			} else {
 				c.After(100 * time.Millisecond)
 			}
-		} else if a.previewPlay {
-			a.previewPlay = false
-			a.startPlayback()
+		} else if !a.previewSince.IsZero() {
+			a.previewSince = time.Time{}
+			if a.position > 0 {
+				a.seek(a.position)
+			}
 		}
 		if issue != "" {
-			if a.videoCut == nil && a.selected.proxy == "" {
-				a.selected.nativePreviewFailed = true
-			}
-			if a.videoCut != nil {
-				a.filteredVideoFailed(issue)
-			} else if a.needsFilteredVideo() {
-				a.closePreviewPlayer()
-				a.scheduleChunkWarm()
-			} else {
-				item, resume := a.selected, a.previewPlay
-				a.closePreview()
-				if item.proxy == "" {
-					a.makePreview(item)
-					a.previewPlay = resume
-				} else {
-					a.previewIssue = issue
-				}
-			}
+			a.closePreview()
+			a.previewIssue = "无法播放原片 · " + issue
 		}
 	} else if preview, ok := a.player.(interface{ Err() error }); ok {
 		if err := preview.Err(); err != nil {

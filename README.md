@@ -4,7 +4,7 @@
 
 - 主波形默认显示 30 秒，可用滑杆和加减按钮缩放。点击下方全局波形定位，拖动框出的区域浏览其他时间段。
 - 直接拖动播放游标的顶部手柄或竖线，按 Escape 可恢复拖动前的位置。点击波形空白处定位，从空白处拖动可框选区间。用「保留」或「移除」修改选区或游标所在片段。拖动波形上沿的边界手柄可调整片段，改动可撤销。
-- 播放键或空格默认试听「过滤后」的结果，跳过移除段。音频用内置 FFmpeg 流式解码，环绕声音轨以立体声试听。视频切点就绪后自动准备游标所在的片段，播放时后台准备下一段。播放键可接续正在准备的片段，也可取消等待。点「原始」可试听完整素材。
+- 播放键或空格默认试听「过滤后」的结果，跳过移除段。音频用内置 FFmpeg 流式解码，环绕声音轨以立体声试听。视频直接用系统播放器播放原片，在切点跳转，密集切点处可能出现短暂停顿。点「原始」可连续播放完整素材。
 - 音频素材在编辑区直接显示大波形，视频素材在波形上方显示画面。可从工作区任意位置拖入本地素材。
 - 窗口较窄时，从顶部「过滤设置」打开参数面板。
 
@@ -21,7 +21,7 @@
 - 视频导出为 H.264/AAC MP4，HDR 素材会进行色调映射并输出为 SDR。音频导出为 24 位 PCM WAV。选用第一条音轨，视频输出最多保留两个声道。过滤、预览与导出都在本机运行。
 - Windows 10/11 amd64 运行 `SilenceCut-windows-x64-setup.exe`，安装后从开始菜单打开 SilenceCut。当前安装包未签名。Windows N 版需要系统的 Media Feature Pack。
 - Apple Silicon（arm64）macOS 14+ 打开 `SilenceCut-macos-arm64.pkg`，安装后从「应用程序」打开 SilenceCut。当前安装包未签名和公证，安装时可能需要在「系统设置 → 隐私与安全性」中手动允许。
-- 视频导出和预览转码默认启用硬件加速。Windows 使用 D3D11VA 和 Media Foundation，macOS 使用 VideoToolbox。兼容的帧直接交给编码器，支持时在设备上缩放。驱动或编码配置不支持时自动回退到可用路径。
+- 视频导出默认启用硬件加速。Windows 使用 D3D11VA 和 Media Foundation，macOS 使用 VideoToolbox。兼容的帧直接交给编码器。驱动或编码配置不支持时自动回退到可用路径。
 - MP4 和 MOV 导出遇到较长的移除段时，会在索引可用的情况下跳到下一段附近的关键帧，再精确处理切点。定位后无法读到完整区间时，自动改用顺序解码。音频解码、静音检测、波形分析和音频导出由 CPU 处理。
 
 ## 从源码构建
@@ -44,14 +44,14 @@ sh scripts/package.sh
 
 发布包位于 `dist/`。窗口与发布包图标均来自 `assets/silencecut.svg`。编译 Go 时通过 `CGO_CFLAGS` 和 `CGO_LDFLAGS` 指向对应架构 SDK 的 `include` 和 `lib`。运行 Windows 测试时还需将 SDK 的 `bin` 加入 PATH。应用运行不需要系统安装 FFmpeg。
 
-排查视频导出或预览转码时，可在启动应用前设置 `SILENCECUT_VIDEO_ACCELERATION=software`，让这两项任务走系统的软件编解码路径。设置 `SILENCECUT_FFMPEG_DEBUG=1` 可在标准错误中查看帧传输方式、回退原因、定位次数和解码帧数。
+排查视频导出时，可在启动应用前设置 `SILENCECUT_VIDEO_ACCELERATION=software`，使用软件编解码路径。设置 `SILENCECUT_FFMPEG_DEBUG=1` 可在标准错误中查看帧传输方式、回退原因、定位次数和解码帧数。
 
 ## 验证
 
-设置 `SILENCECUT_TEST_VIDEO` 指向一段至少一分钟、带有停顿的本地视频后，可用下面的命令比较 720p 和 540p 全片代理，以及从片中启动时首段的生成耗时。Windows 需要加上 `-tags mygo_nowebview`。基准覆盖默认和强制软件路径，`ffprobe` 会核对代理文件的时长。应用使用等效 540p 的试听代理，正式视频仍按源尺寸导出。
+设置 `SILENCECUT_TEST_VIDEO` 指向一段至少一分钟、带有停顿的本地视频后，可用下面的命令比较默认和强制软件的视频导出路径。`ffprobe` 会核对导出文件的时长。Windows 需要加上 `-tags mygo_nowebview`。
 
 ```sh
-go test -run '^$' -bench '^BenchmarkLongVideoPreview$' -benchtime=1x ./internal/media
+go test -run '^$' -bench '^BenchmarkLongVideoExport$' -benchtime=1x ./internal/media
 ```
 
 打包工作流在独立 Windows 和 macOS runner 上安装并启动应用。Windows 另外验证卸载。推送到 `verify/**` 分支可运行这一流程。新建标签会在安装验证通过后发布安装包。

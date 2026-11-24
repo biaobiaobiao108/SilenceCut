@@ -221,17 +221,9 @@ func Extension(info Info) string {
 }
 
 // Export writes to a temporary file in the destination directory and publishes only a closed muxer.
-func Export(ctx context.Context, source, dir, base string, spans []timeline.Span, proxy bool, progress Progress) (string, error) {
-	if proxy {
-		return Preview(ctx, source, dir, base, spans, 1280, progress)
-	}
-	return Preview(ctx, source, dir, base, spans, 0, progress)
-}
-
-// Preview limits the longest edge of the temporary video. Zero keeps the source size.
-func Preview(ctx context.Context, source, dir, base string, spans []timeline.Span, maxEdge int, progress Progress) (string, error) {
+func Export(ctx context.Context, source, dir, base string, spans []timeline.Span, progress Progress) (string, error) {
 	software := os.Getenv("SILENCECUT_VIDEO_ACCELERATION") == "software"
-	return export(ctx, source, dir, base, spans, maxEdge, software, true, progress)
+	return export(ctx, source, dir, base, spans, software, true, progress)
 }
 
 type videoPipelineError struct {
@@ -249,7 +241,7 @@ func pipelineError(action string, code, video C.int) error {
 
 var errGapSeek = errors.New("定位后无法恢复完整的音视频区间")
 
-func export(ctx context.Context, source, dir, base string, spans []timeline.Span, maxEdge int, software, skipGaps bool, progress Progress) (string, error) {
+func export(ctx context.Context, source, dir, base string, spans []timeline.Span, software, skipGaps bool, progress Progress) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -306,7 +298,7 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 			// The current attempt already uses software decoding and hardware encoding.
 			mode = C.CUT_HARDWARE_ENCODER
 		}
-		err = encode(ctx, in, info, path, maxEdge, skipGaps, audioRanges, videoRanges, report)
+		err = encode(ctx, in, info, path, skipGaps, audioRanges, videoRanges, report)
 		C.cut_close(in)
 		in = nil
 		if err == nil {
@@ -358,11 +350,11 @@ type outputSpan struct {
 	start, end, output, length int64
 }
 
-func encode(ctx context.Context, in *C.CutInput, info Info, path string, maxEdge int, skipGaps bool, audioRanges, videoRanges []outputSpan, progress Progress) error {
+func encode(ctx context.Context, in *C.CutInput, info Info, path string, skipGaps bool, audioRanges, videoRanges []outputSpan, progress Progress) error {
 	name := C.CString(path)
 	defer C.free(unsafe.Pointer(name))
 	var code, videoError C.int
-	out := C.cut_create(in, name, C.int(maxEdge), &code, &videoError)
+	out := C.cut_create(in, name, &code, &videoError)
 	if out == nil {
 		return pipelineError("无法创建导出文件", code, videoError)
 	}

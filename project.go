@@ -152,7 +152,6 @@ func (a *app) markProject() {
 	if a.projectPath != "" || len(a.assets) > 0 || a.projectDirty {
 		a.projectDirty = true
 		a.scheduleRecovery()
-		a.scheduleChunkWarm()
 	}
 }
 
@@ -412,9 +411,6 @@ func (a *app) refreshProjectTitle() {
 
 func (a *app) loadProject(doc projectDocument, path string, recovered bool) {
 	a.closePreview()
-	for _, item := range a.assets {
-		clearAssetPreviews(item)
-	}
 	a.clearRecovery()
 	a.projectPath, a.projectDirty = path, recovered
 	a.refreshProjectTitle()
@@ -511,8 +507,7 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 		}
 		a.win.Update(func() {
 			if a.selected != nil && a.selected.file != nil && !a.selected.offline && a.selected.info.Duration > 0 {
-				a.openPreview(a.selected, false)
-				a.primeFilteredVideo()
+				a.openPreview(a.selected)
 			}
 			status := "已读取项目素材"
 			if ctx.Err() != nil {

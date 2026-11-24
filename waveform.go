@@ -87,22 +87,10 @@ func clipAt(clips []timeline.Clip, at int64) int {
 }
 
 func (a *app) stopPlayback() {
-	preparing := a.buildingCut || a.previewPlay
 	if a.player != nil {
 		a.player.Pause()
 	}
-	a.wasPlaying, a.previewPlay = false, false
-	if a.buildingCut && a.previewCancel != nil {
-		a.previewCancel()
-		a.previewCancel = nil
-	}
-	a.cancelChunk()
-	if a.videoCut != nil {
-		a.closePreview()
-		a.openPreview(a.selected, false)
-	} else if preparing && a.player == nil && a.selected != nil && a.selected.file != nil && a.previewCancel == nil {
-		a.openPreview(a.selected, false)
-	}
+	a.wasPlaying = false
 }
 
 func (a *app) timeline(c *ui.Context) {
@@ -137,9 +125,7 @@ func (a *app) timeline(c *ui.Context) {
 		ui.Row(c).AlignItems(ui.Center).Gap(8).Shrink(0).Children(func() {
 			ui.Toolbar(c.Key("tools"), func() {
 				icon, label := iconPlay, "播放"
-				if a.buildingCut || a.previewPlay {
-					icon, label = iconStop, "取消准备试听"
-				} else if a.player != nil && a.player.Playing() {
+				if a.player != nil && a.player.Playing() {
 					icon, label = iconPause, "暂停"
 				}
 				flatAction(c.Key("play"), label, playable, a.togglePlay).
@@ -180,27 +166,20 @@ func (a *app) timeline(c *ui.Context) {
 		if item.info.Video && !item.offline {
 			ui.Box(c.Key("video-preview")).Grow(1.15).MinHeight(120).Center().
 				Radius(controlRadius).Background(screen).Clip().Children(func() {
-				visible := a.video
-				if visible == nil && !a.buildingCut {
-					visible = a.nextVideo
-				}
-				ready := visible != nil && visible.Ready()
-				if visible != nil {
+				ready := a.video != nil && a.video.Ready()
+				if a.video != nil {
 					// Building Video pumps the native decoder, including while it opens.
-					video := ui.Video(c.Key(a.previewSeq), visible).Fill().Fit(ui.Contain)
+					video := ui.Video(c.Key(a.previewSeq), a.video).Fill().Fit(ui.Contain)
 					target := float32(0)
 					if ready {
 						target = 1
 					}
-					if a.videoCut == nil {
-						target = video.Animate("ready", target, revealDuration)
-					}
-					video.Opacity(target)
-					if !ready && visible.Ready() {
+					video.Opacity(video.Animate("ready", target, revealDuration))
+					if !ready && a.video.Ready() {
 						c.Invalidate()
 					}
 				}
-				if !ready || a.buildingCut || a.videoCut == nil && a.chunkJob != nil {
+				if !ready {
 					ui.Column(c.Key("video-feedback")).Absolute().Left(0).Top(0).Right(0).Bottom(0).
 						Background(screen.Alpha(.72)).Center().Children(func() {
 						a.previewFeedback(c, item)
@@ -288,7 +267,7 @@ func (a *app) wave(c *ui.Context, item *asset, duration int64, allowed bool) {
 	e.Children(func() {
 		ui.Box(c.Key(item.path)).Fill().Transition(reveal(c, &ui.Motion{}, false)).
 			Draw(func(p *ui.Painter, r ui.Rect) { a.drawWave(p, r, item, length) })
-		if !item.info.Video && (a.previewCancel != nil || a.previewIssue != "") {
+		if !item.info.Video && a.previewIssue != "" {
 			ui.Box(c.Key("audio-preview-feedback")).Absolute().Right(8).Bottom(8).Radius(controlRadius).
 				Padding(6, 8).MaxWidth(max(0, w-16)).Background(rail).Children(func() { a.previewFeedback(c, item) })
 		}

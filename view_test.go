@@ -354,18 +354,11 @@ func TestPlayheadAndBoundaryGestures(t *testing.T) {
 	}
 
 	item.info.Video = true
-	item.path = filepath.Join(t.TempDir(), "source.mp4")
-	if err := os.WriteFile(item.path, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	item.file, _ = os.Stat(item.path)
-	a.videoCut = previewChunk(item.history.Clips, 15*second)
 	view.Frame()
 	if err := view.Click("播放"); err != nil || !p.Playing() || a.position != 15*second ||
-		p.seeks[len(p.seeks)-1] != 0 {
+		p.seeks[len(p.seeks)-1] != 15*second {
 		t.Fatalf("filtered playback did not map the cut: %v, cursor %d, seeks %v", err, a.position, p.seeks)
 	}
-	a.videoCut = nil
 	a.stopPlayback()
 	a.seek(12 * second)
 	view.Frame()
@@ -446,21 +439,17 @@ func TestBatchStatusAndPublishedFolder(t *testing.T) {
 	}
 }
 
-func TestFilteredVideoPreparationFeedback(t *testing.T) {
+func TestOriginalVideoPreviewError(t *testing.T) {
 	item := &asset{info: media.Info{Duration: 2 * timeline.Second, Video: true}}
-	canceled := false
 	a := &app{
 		assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"},
-		buildingCut: true, previewProgress: .42, previewCancel: func() { canceled = true },
+		previewIssue: "无法播放原片",
 	}
 	view := ui.NewTester(a.view, 930, 690)
-	if !view.HasText("正在准备过滤后试听 · 42%") {
-		t.Fatal("filtered video preparation has no progress feedback")
+	if !view.HasText("无法播放原片") {
+		t.Fatal("source video failure has no feedback")
 	}
-	if err := view.Click("取消准备试听"); err != nil {
-		t.Fatal(err)
-	}
-	if !canceled || a.buildingCut || a.previewProgress != 0 {
-		t.Fatal("cancel must clear pending preview and progress")
+	if _, ok := view.Find("重试预览"); !ok {
+		t.Fatal("source video failure has no retry action")
 	}
 }

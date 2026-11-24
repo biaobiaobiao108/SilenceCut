@@ -74,22 +74,19 @@ func (f filterOptions) custom() (values [3]float64, issues [3]string) {
 }
 
 type asset struct {
-	path, name          string
-	file                os.FileInfo
-	info                media.Info
-	peaks               []timeline.Peak
-	waveform            timeline.Waveform
-	automatic           float64
-	settings            timeline.Settings
-	history             timeline.History
-	filtered            []timeline.Clip
-	analyzing           bool
-	issue               string
-	proxy               string
-	cutPreviews         []*filteredVideo
-	source              sourceStamp
-	offline             bool
-	nativePreviewFailed bool
+	path, name string
+	file       os.FileInfo
+	info       media.Info
+	peaks      []timeline.Peak
+	waveform   timeline.Waveform
+	automatic  float64
+	settings   timeline.Settings
+	history    timeline.History
+	filtered   []timeline.Clip
+	analyzing  bool
+	issue      string
+	source     sourceStamp
+	offline    bool
 }
 
 type player interface {
@@ -103,13 +100,11 @@ type player interface {
 
 type app struct {
 	win                            *mygo.Window
-	temp                           string
 	workers                        sync.WaitGroup
 	assets                         []*asset
 	selected                       *asset
 	opts                           filterOptions
 	cancel                         context.CancelFunc
-	previewCancel                  context.CancelFunc
 	previewSeq                     int
 	job, status, outputDir         string
 	publishedDir                   string
@@ -122,14 +117,7 @@ type app struct {
 	player                         player
 	video                          *ui.VideoPlayer
 	previewIssue                   string
-	previewSince                   time.Time
-	previewProgress                float64
-	videoCut                       *filteredVideo
-	chunkJob                       *previewJob
-	nextVideo                      *ui.VideoPlayer
-	nextCut                        *filteredVideo
-	warmAt                         time.Time
-	buildingCut, previewPlay       bool
+	previewSince, videoSeekAt      time.Time
 	wasPlaying                     bool
 	position                       int64
 	selection                      timeline.Span
@@ -146,12 +134,7 @@ type app struct {
 }
 
 func main() {
-	temp, err := os.MkdirTemp("", "silencecut-*")
-	if err != nil {
-		log.Fatal(err)
-	}
 	state := &app{
-		temp: temp,
 		opts: filterOptions{preset: "慢", level: "-40", before: "0.10", after: "0.10"},
 	}
 	recovery, previous, recoveryErr := openRecovery()
@@ -204,12 +187,9 @@ func main() {
 			state.offerRecovery(previous)
 		}
 	})
-	err = mygo.App.Run()
+	err := mygo.App.Run()
 	previous.close(false)
 	state.workers.Wait()
-	if removeErr := os.RemoveAll(temp); removeErr != nil {
-		log.Print(removeErr)
-	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -307,8 +287,7 @@ func (a *app) selectAsset(item *asset) {
 	a.waveDrag, a.overviewDrag = waveGesture{}, overviewGesture{}
 	a.scheduleRecovery()
 	if item != nil && !item.offline && item.info.Duration > 0 {
-		a.openPreview(item, false)
-		a.scheduleChunkWarm()
+		a.openPreview(item)
 	}
 }
 
@@ -324,7 +303,6 @@ func (a *app) removeSelected() {
 	} else {
 		a.selectAsset(a.assets[min(index, len(a.assets)-1)])
 	}
-	clearAssetPreviews(selected)
 	a.markProject()
 	a.status = ""
 }
@@ -349,7 +327,6 @@ func (a *app) end(status string) {
 	a.cancel()
 	a.cancel, a.job, a.status = nil, "", status
 	a.canceling = false
-	a.scheduleChunkWarm()
 }
 
 func (a *app) report() media.Progress {
@@ -417,7 +394,7 @@ func (a *app) filter(items []*asset) {
 				if err == nil {
 					current.waveform = timeline.BuildWaveform(current.peaks)
 					current.automatic = timeline.AutomaticThreshold(current.peaks)
-					current.file, current.proxy = stat, ""
+					current.file = stat
 				}
 			}
 			if err == nil {
@@ -444,7 +421,6 @@ func (a *app) filter(items []*asset) {
 					if item == a.selected {
 						a.closePreview()
 					}
-					clearAssetPreviews(item)
 				}
 				item.info, item.peaks, item.automatic = current.info, current.peaks, current.automatic
 				item.waveform = current.waveform
@@ -456,9 +432,8 @@ func (a *app) filter(items []*asset) {
 					a.selection = timeline.Span{}
 					if reload {
 						a.position, a.viewStart, a.viewLength = 0, 0, 0
-						a.openPreview(item, false)
+						a.openPreview(item)
 					}
-					a.primeFilteredVideo()
 				}
 			})
 		}
@@ -572,7 +547,7 @@ func exportAsset(ctx context.Context, item asset, dir string, clips, onlyKept bo
 		if len(spans) == 0 {
 			return 0, nil
 		}
-		_, err := media.Export(ctx, item.path, dir, base+"_已过滤", spans, false, progress)
+		_, err := media.Export(ctx, item.path, dir, base+"_已过滤", spans, progress)
 		if err != nil {
 			return 0, err
 		}
@@ -596,7 +571,7 @@ func exportAsset(ctx context.Context, item asset, dir string, clips, onlyKept bo
 			label = "保留"
 		}
 		name := fmt.Sprintf("%03d_%s", index+1, label)
-		_, err := media.Export(ctx, item.path, folder, name, []timeline.Span{part.Span}, false, func(value float64) {
+		_, err := media.Export(ctx, item.path, folder, name, []timeline.Span{part.Span}, func(value float64) {
 			progress((float64(index) + value) / float64(len(parts)))
 		})
 		if err != nil {
@@ -625,99 +600,36 @@ func clipFolder(dir, base string) (string, error) {
 }
 
 func (a *app) closePreview() {
-	a.cancelChunk()
-	a.warmAt = time.Time{}
-	a.closePreviewPlayer()
-}
-
-func (a *app) closePreviewPlayer() {
 	a.previewSeq++
-	if a.previewCancel != nil {
-		a.previewCancel()
-		a.previewCancel = nil
-	}
 	if a.player != nil {
 		a.player.Close()
 	}
 	a.player, a.video, a.previewIssue = nil, nil, ""
-	a.videoCut = nil
-	a.previewPlay, a.wasPlaying = false, false
+	a.previewSince, a.videoSeekAt = time.Time{}, time.Time{}
+	a.wasPlaying = false
 }
 
-func (a *app) openPreview(item *asset, proxy bool) {
+func (a *app) openPreview(item *asset) {
 	if item.offline {
 		return
 	}
-	path := item.path
-	if item.proxy != "" {
-		path, proxy = item.proxy, true
-	}
 	if item.info.Video {
-		if err := a.openVideo(path); err == nil {
-			a.seek(a.position)
-			return
-		} else {
+		p, err := video.Open(item.path)
+		if err != nil {
 			a.previewIssue = err.Error()
-			if !proxy {
-				item.nativePreviewFailed = true
-			}
-		}
-	} else {
-		p, err := openAudioPreview(path, nil)
-		if err == nil {
-			a.player = p
-			p.Seek(time.Duration(a.position) * time.Microsecond)
 			return
 		}
+		p.Pause()
+		a.player, a.video, a.previewSince = p, p, time.Now()
+		return
+	}
+	p, err := openAudioPreview(item.path, nil)
+	if err != nil {
 		a.previewIssue = err.Error()
 		return
 	}
-	if a.needsFilteredVideo() {
-		a.previewIssue = ""
-		a.scheduleChunkWarm()
-	} else if !proxy {
-		a.makePreview(item)
-	} else {
-		a.previewPlay = false
-	}
-}
-
-func (a *app) openVideo(path string) error {
-	p, err := video.Open(path)
-	if err != nil {
-		return err
-	}
-	p.Pause()
-	a.player, a.video, a.previewSince = p, p, time.Now()
-	return nil
-}
-
-func (a *app) makePreview(item *asset) {
-	a.closePreview()
-	ctx, cancel := context.WithCancel(context.Background())
-	a.previewCancel = cancel
-	seq, dir := a.previewSeq, a.temp
-	source, span := item.path, timeline.Span{End: item.info.Duration}
-	a.async(func() {
-		path, err := media.Preview(ctx, source, dir, "preview", []timeline.Span{span}, previewEdge, func(float64) {})
-		a.win.Update(func() {
-			if a.closing || seq != a.previewSeq {
-				if err == nil {
-					_ = os.Remove(path)
-				}
-				return
-			}
-			cancel()
-			a.previewCancel = nil
-			if err != nil {
-				a.previewPlay = false
-				a.previewIssue = err.Error()
-				return
-			}
-			item.proxy = path
-			a.openPreview(item, true)
-		})
-	})
+	a.player = p
+	a.seek(a.position)
 }
 
 func (a *app) seek(position int64) {
@@ -726,70 +638,48 @@ func (a *app) seek(position int64) {
 	}
 	a.position = max(0, min(position, a.selected.info.Duration))
 	a.scheduleRecovery()
-	a.scheduleChunkWarm()
-	position = a.position
-	if a.videoCut != nil {
-		position = a.videoCut.editedPosition(position)
+	if a.player == nil || a.video != nil && !a.video.Ready() {
+		return
 	}
-	if a.player != nil {
-		a.player.Seek(time.Duration(position) * time.Microsecond)
+	if a.selected.info.Video {
+		a.videoSeekAt = time.Now()
 	}
+	a.player.Seek(time.Duration(a.position) * time.Microsecond)
 }
 
 func (a *app) togglePlay() {
-	if a.busy() || a.waveDrag.kind != waveIdle {
+	if a.busy() || a.waveDrag.kind != waveIdle || a.selected == nil || a.selected.offline ||
+		a.player == nil || a.video != nil && !a.video.Ready() {
 		return
 	}
-	if a.buildingCut || a.previewPlay {
-		a.stopPlayback()
-		a.warmAt = time.Time{}
-		return
-	}
-	if a.selected == nil || a.selected.offline {
-		return
-	}
-	if a.player != nil && a.player.Playing() {
+	if a.player.Playing() {
 		a.player.Pause()
-		a.wasPlaying = false
+		a.updatePlaybackPosition()
 		return
 	}
 	clips := a.selected.history.Clips
-	if !a.needsFilteredVideo() && (a.player == nil || a.video != nil && !a.video.Ready()) {
-		return
-	}
+	target := a.position
 	if !a.originalPreview {
-		first, ok := nextRetained(clips, 0)
-		if !ok {
-			return
+		var ok bool
+		if target, ok = nextRetained(clips, target); !ok {
+			if target, ok = nextRetained(clips, 0); !ok {
+				return
+			}
 		}
-		if target, ok := nextRetained(clips, a.position); ok {
-			a.position = target
-		} else {
-			a.position = first
-		}
-	} else if a.position >= a.selected.info.Duration {
-		a.position = 0
+	} else if target >= a.selected.info.Duration {
+		target = 0
 	}
-	if a.selected.info.Video {
-		if a.needsFilteredVideo() {
-			a.requestChunk(a.position, true)
-			return
-		}
-	} else if !a.prepareAudioPlayback(clips) {
+	if !a.selected.info.Video && !a.prepareAudioPlayback(clips) {
 		return
 	}
-	a.startPlayback()
-}
-
-func (a *app) startPlayback() {
-	if a.videoCut == nil || a.video == nil || a.video.Ended() ||
-		a.videoCut.editedPosition(a.position) != a.video.Position().Microseconds() {
-		a.seek(a.position)
+	if a.video != nil && a.video.Ended() ||
+		target != a.player.Position().Microseconds() && (target != a.position || a.videoSeekAt.IsZero()) {
+		a.seek(target)
 	}
+	a.position = target
 	a.followPlayhead()
 	a.player.Play()
 	a.wasPlaying = a.player.Playing()
-	a.prefetchChunk()
 }
 
 func (a *app) prepareAudioPlayback(clips []timeline.Clip) bool {
@@ -811,19 +701,14 @@ func (a *app) prepareAudioPlayback(clips []timeline.Clip) bool {
 }
 
 func (a *app) setPreviewMode(original bool) {
-	playing := a.buildingCut || a.previewPlay || a.player != nil && a.player.Playing()
-	a.originalPreview = original
-	a.stopPlayback()
-	if a.selected != nil && a.selected.info.Video && a.player == nil && a.previewCancel == nil {
-		a.openPreview(a.selected, false)
-	}
-	a.markProject()
-	a.scheduleChunkWarm()
+	playing := a.player != nil && a.player.Playing()
 	if playing {
-		if original && a.selected.info.Video && (a.video == nil || !a.video.Ready()) {
-			a.previewPlay = a.previewCancel != nil || a.video != nil
-			return
-		}
+		a.player.Pause()
+		a.updatePlaybackPosition()
+	}
+	a.originalPreview = original
+	a.markProject()
+	if playing {
 		if _, ok := nextRetained(a.selected.history.Clips, a.position); original || ok {
 			a.togglePlay()
 		}
@@ -831,9 +716,8 @@ func (a *app) setPreviewMode(original bool) {
 }
 
 func (a *app) previewPlayable(kept int64) bool {
-	return a.selected != nil && !a.selected.offline && !a.busy() && (a.buildingCut || a.previewPlay ||
-		a.needsFilteredVideo() && kept > 0 ||
-		a.player != nil && (a.video == nil || a.video.Ready()) && (a.originalPreview || kept > 0))
+	return a.selected != nil && !a.selected.offline && !a.busy() && a.player != nil &&
+		(a.video == nil || a.video.Ready()) && (a.originalPreview || kept > 0)
 }
 
 func nextRetained(clips []timeline.Clip, at int64) (int64, bool) {
@@ -855,20 +739,45 @@ func (a *app) updatePlaybackPosition() bool {
 	if !playing && !a.wasPlaying {
 		return false
 	}
-	position := a.player.Position().Microseconds()
-	if a.videoCut != nil {
-		position = a.videoCut.sourcePosition(position)
+	a.wasPlaying = playing
+	position := max(0, min(a.player.Position().Microseconds(), a.selected.info.Duration))
+	if !a.videoSeekAt.IsZero() {
+		// Native seeks can report the previous timestamp until the decoder lands.
+		elapsed := time.Since(a.videoSeekAt)
+		delta := position - a.position
+		if delta < -1_000 || delta > elapsed.Microseconds()+100_000 {
+			if elapsed < 2*time.Second {
+				return playing
+			}
+			a.stopPlayback()
+			a.videoSeekAt = time.Time{}
+			a.status = "视频定位超时，请重新定位后播放"
+			return false
+		}
+		a.videoSeekAt = time.Time{}
 	}
-	a.position = max(0, min(position, a.selected.info.Duration))
+	if a.selected.info.Video {
+		position = max(a.position, position)
+	}
+	if a.selected.info.Video && !a.originalPreview {
+		clips := a.selected.history.Clips
+		if len(clips) > 0 {
+			last := clips[len(clips)-1]
+			if !last.Keep && position >= last.Start {
+				a.stopPlayback()
+				a.seek(last.Start)
+				position, playing = last.Start, false
+			} else if playing {
+				if target, ok := nextRetained(clips, position); ok && target > position {
+					a.seek(target)
+					position = target
+				}
+			}
+		}
+	}
+	a.position = position
 	if !a.overviewDrag.active {
 		a.followPlayhead()
-	}
-	a.wasPlaying = playing
-	if !playing && a.videoCut != nil && a.videoCut.windowEnd > 0 && a.video != nil && a.video.Ended() {
-		if next, ok := nextRetained(a.selected.history.Clips, a.videoCut.windowEnd); ok {
-			a.position = next
-			a.requestChunk(next, true)
-		}
 	}
 	a.scheduleRecovery()
 	return playing

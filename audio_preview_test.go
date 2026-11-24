@@ -87,7 +87,7 @@ func TestAudioFormatWorkflow(t *testing.T) {
 			cut := newAuditionDecoder(original, nil, clips)
 			boundary := cut.spans[2].editedStart
 			assertLevel(cut, boundary+24000, true)
-			rendered, err := media.Export(ctx, source, dir, "导出", kept, false, progress)
+			rendered, err := media.Export(ctx, source, dir, "导出", kept, progress)
 			if err != nil {
 				t.Fatal(err)
 			}
