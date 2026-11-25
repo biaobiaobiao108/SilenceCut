@@ -86,6 +86,7 @@ func (a *app) view(c *ui.Context) {
 	c.OnWindowShortcut(mod, ui.KeyO, a.chooseFiles)
 	c.OnWindowShortcut(mod|ui.Shift, ui.KeyO, a.chooseOpenProject)
 	c.OnWindowShortcut(mod, ui.KeyS, func() { a.chooseSaveProject(nil) })
+	c.OnWindowShortcut(mod|ui.Shift, ui.KeyS, func() { a.chooseNewProjectPath(nil) })
 	c.OnWindowShortcut(mod, ui.KeyZ, func() { a.history(false) })
 	c.OnWindowShortcut(mod|ui.Shift, ui.KeyZ, func() { a.history(true) })
 	root := ui.Column(c.Key("workspace")).Fill()
@@ -158,9 +159,16 @@ func (a *app) toolbar(c *ui.Context, narrow bool) {
 			Padding(0, right, 0, railInset).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Row(c).Gap(1).Shrink(0).Children(func() {
 				iconButton(c.Key("project-open"), iconOpen, "打开项目", !a.busy(), false, a.chooseOpenProject)
-				iconButton(c.Key("project-save"), iconSave, "保存项目",
+				save := iconButton(c.Key("project-save"), iconSave, "保存项目",
 					!a.busy() && (a.projectDirty || a.projectPath != "" || len(a.assets) > 0),
-					false, func() { a.chooseSaveProject(nil) })
+					false, func() { a.chooseSaveProject(nil) }).
+					Description("保存项目；Ctrl/Cmd+Shift+S 另存为")
+				save.ContextMenu(func(m *ui.Menu) {
+					if m.Item("另存为…").Disabled(a.busy() ||
+						a.projectPath == "" && len(a.assets) == 0 && !a.projectDirty).Chosen() {
+						a.chooseNewProjectPath(nil)
+					}
+				})
 			})
 			ui.Spacer(c)
 			if narrow {
@@ -289,8 +297,17 @@ func (a *app) assetMenu(item *asset) func(*ui.Menu) {
 	return func(m *ui.Menu) {
 		a.selectAsset(item)
 		busy := a.busy()
+		errorItem := func() {
+			if assetErrorText(item) == "" {
+				return
+			}
+			if m.Item("查看错误详情…").Disabled(busy).Chosen() {
+				a.showAssetError(item)
+			}
+		}
 		if item.pendingLoad {
 			a.assetPathItems(m, item)
+			errorItem()
 			m.Separator()
 			if m.Item("从列表移除").Disabled(busy).Chosen() {
 				a.removeAsset(item)
@@ -301,6 +318,7 @@ func (a *app) assetMenu(item *asset) func(*ui.Menu) {
 			if m.Item("重新定位…").Disabled(busy).Chosen() {
 				a.relinkProjectSource(item)
 			}
+			errorItem()
 			m.Separator()
 			if m.Item("从列表移除").Disabled(busy).Chosen() {
 				a.removeAsset(item)
@@ -308,6 +326,7 @@ func (a *app) assetMenu(item *asset) func(*ui.Menu) {
 			return
 		}
 		a.assetPathItems(m, item)
+		errorItem()
 		m.Separator()
 		if m.Item("重新过滤").Disabled(busy).Chosen() {
 			a.requestFilter([]*asset{item})
@@ -567,7 +586,8 @@ func (a *app) history(redo bool) {
 
 func (a *app) activity(c *ui.Context) {
 	pending := slices.ContainsFunc(a.assets, func(item *asset) bool { return item.pendingLoad })
-	if a.cancel == nil && a.status == "" && a.publishedDir == "" && !pending {
+	errorCount, _ := a.errorReport()
+	if a.cancel == nil && a.status == "" && a.publishedDir == "" && !pending && errorCount == 0 {
 		return
 	}
 	ui.Row(c.Key("activity")).AlignItems(ui.Center).Gap(8).Shrink(0).Height(controlHeight).Children(func() {
@@ -590,6 +610,9 @@ func (a *app) activity(c *ui.Context) {
 		}
 		if pending {
 			textAction(c.Key("resume-sources"), "继续读取素材", !a.busy(), a.resumeProjectSources)
+		}
+		if errorCount > 0 {
+			textAction(c.Key("error-details"), "查看错误详情", !a.busy(), a.showAllAssetErrors)
 		}
 		if a.publishedDir != "" {
 			textAction(c.Key("output-folder"), "打开导出文件夹", true, func() {

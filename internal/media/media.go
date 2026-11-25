@@ -246,21 +246,14 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 		if canceled := ctx.Err(); canceled != nil {
 			return "", canceled
 		}
-		if errors.Is(err, errGapSeek) {
-			skipGaps = false
-		} else {
-			var videoError videoPipelineError
-			if !info.Video || mode == C.CUT_SOFTWARE || !errors.As(err, &videoError) {
-				return "", err
-			}
-			if videoError.decode && mode >= C.CUT_HARDWARE {
-				mode = C.CUT_HARDWARE_ENCODER
-			} else {
-				mode--
-			}
+		cause := err
+		nextMode, nextSkip, retryErr := nextExportMode(err, info, int32(mode), skipGaps)
+		if retryErr != nil {
+			return "", retryErr
 		}
+		mode, skipGaps = C.int(nextMode), nextSkip
 		if ffmpegDebug {
-			fmt.Fprintf(os.Stderr, "SilenceCut export retry: mode=%d indexed-seek=%t cause=%v\n", mode, skipGaps, err)
+			fmt.Fprintf(os.Stderr, "SilenceCut export retry: mode=%d indexed-seek=%t cause=%v\n", mode, skipGaps, cause)
 		}
 		var retryInfo Info
 		in, retryInfo, err = open(ctx, source, mode, token)
@@ -286,6 +279,23 @@ func export(ctx context.Context, source, dir, base string, spans []timeline.Span
 			return final, err
 		}
 	}
+}
+
+func nextExportMode(err error, info Info, mode int32, skipGaps bool) (int32, bool, error) {
+	if errors.Is(err, errGapSeek) {
+		if !skipGaps {
+			return mode, skipGaps, err
+		}
+		return mode, false, nil
+	}
+	var videoError videoPipelineError
+	if !info.Video || mode == C.CUT_SOFTWARE || !errors.As(err, &videoError) {
+		return mode, skipGaps, err
+	}
+	if videoError.decode && mode >= C.CUT_HARDWARE {
+		return C.CUT_HARDWARE_ENCODER, skipGaps, nil
+	}
+	return mode - 1, skipGaps, nil
 }
 
 type outputSpan struct {

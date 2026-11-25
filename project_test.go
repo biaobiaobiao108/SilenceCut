@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"silencecut/internal/media"
 	"silencecut/internal/timeline"
@@ -134,9 +135,71 @@ func TestProjectSaveRejectsStaleVersion(t *testing.T) {
 	}
 }
 
+func TestProjectSaveAsReplacesExistingTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "已有项目.silencecut")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := &app{opts: filterOptions{preset: "慢"}}
+	if err := source.saveProjectAs(path); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := readProject(path)
+	if err != nil || doc.Preset != "慢" || source.projectPath != path || source.projectDirty {
+		t.Fatalf("save as over existing target: %+v, %v, path=%s dirty=%t", doc, err, source.projectPath, source.projectDirty)
+	}
+	lock, err := lockProjectSave(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := source.saveProjectAs(path); !errors.Is(err, errProjectConflict) {
+		t.Fatalf("save as while target is locked: %v", err)
+	}
+}
+
+func TestProjectRejectsInvalidOptions(t *testing.T) {
+	duration := 5 * timeline.Second
+	clips := []timeline.Clip{{Span: timeline.Span{End: duration}, Keep: true}}
+	item := &asset{
+		path: "source.wav", name: "source.wav", info: media.Info{Duration: duration, Rate: 48000, Channels: 1},
+		history: timeline.History{Clips: clips}, filtered: clips,
+	}
+	base := (&app{
+		assets: []*asset{item}, selected: item,
+		opts:     filterOptions{preset: "自定义", level: "-40", before: "0.1", after: "0.2"},
+		position: timeline.Second, viewLength: 2 * timeline.Second,
+		selection: timeline.Span{Start: timeline.Second, End: 2 * timeline.Second},
+	}).snapshot("")
+	tests := []struct {
+		name string
+		edit func(*projectDocument)
+	}{
+		{"unknown preset", func(doc *projectDocument) { doc.Preset = "未知" }},
+		{"invalid custom value", func(doc *projectDocument) { doc.Before = "bad" }},
+		{"selected out of range", func(doc *projectDocument) { doc.Selected = 2 }},
+		{"view outside media", func(doc *projectDocument) { doc.ViewStart = duration }},
+		{"selection outside media", func(doc *projectDocument) { doc.Selection.End = duration + 1 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := base
+			doc.Assets = slices.Clone(base.Assets)
+			tt.edit(&doc)
+			path := filepath.Join(t.TempDir(), "invalid.silencecut")
+			if err := writeProject(path, doc); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readProject(path); err == nil {
+				t.Fatal("invalid project was accepted")
+			}
+		})
+	}
+}
+
 func TestProjectConcurrentSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "项目.silencecut")
-	first, second := &app{}, &app{}
+	first, second := &app{opts: filterOptions{preset: "中等"}}, &app{opts: filterOptions{preset: "中等"}}
 	if err := first.saveProject(path, true); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +238,7 @@ func TestProjectConcurrentSave(t *testing.T) {
 func TestSameDirectoryProjectsCanSaveIndependently(t *testing.T) {
 	dir := t.TempDir()
 	firstPath, secondPath := filepath.Join(dir, "first.silencecut"), filepath.Join(dir, "second.silencecut")
-	first, second := &app{}, &app{}
+	first, second := &app{opts: filterOptions{preset: "中等"}}, &app{opts: filterOptions{preset: "中等"}}
 	if err := first.saveProject(firstPath, true); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +266,8 @@ func TestRecoverySkipsActiveSessions(t *testing.T) {
 		t.Fatalf("first launch: %v, %v", previous, err)
 	}
 	t.Cleanup(func() { first.close(false) })
-	state := &app{recovery: first, projectDirty: true, projectPath: "existing.silencecut"}
+	state := &app{recovery: first, projectDirty: true, projectPath: "existing.silencecut",
+		opts: filterOptions{preset: "中等"}}
 	if err := state.writeRecovery(); err != nil {
 		t.Fatal(err)
 	}
@@ -225,6 +289,53 @@ func TestRecoverySkipsActiveSessions(t *testing.T) {
 	}
 }
 
+func TestRecoveryRemovesSupersededSessions(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	create := func(name string, modified time.Time) (string, string) {
+		t.Helper()
+		raw := filepath.Join(dir, name)
+		snapshot := raw + projectExt
+		if err := os.WriteFile(raw, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(snapshot, []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{raw, snapshot} {
+			if err := os.Chtimes(path, modified, modified); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return raw, snapshot
+	}
+	oldRaw, oldSnapshot := create("session-old", now.Add(-2*time.Hour))
+	newRaw, newSnapshot := create("session-new", now.Add(-time.Hour))
+	orphan := filepath.Join(dir, "session-orphan")
+	if err := os.WriteFile(orphan, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	current, previous, err := openRecoveryAt(dir)
+	if err != nil || previous == nil || previous.file.Name() != newRaw {
+		t.Fatalf("newest stale session was not selected: %v, %v", previous, err)
+	}
+	t.Cleanup(func() {
+		current.close(true)
+		previous.close(true)
+	})
+	for _, path := range []string{oldRaw, oldSnapshot, orphan} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("superseded recovery remains at %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{newRaw, newSnapshot} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("newest recovery was removed at %s: %v", path, err)
+		}
+	}
+}
+
 func TestCorruptRecoveryIsDiscarded(t *testing.T) {
 	dir := t.TempDir()
 	first, _, err := openRecoveryAt(dir)
@@ -232,7 +343,7 @@ func TestCorruptRecoveryIsDiscarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { first.close(true) })
-	state := &app{recovery: first, projectDirty: true}
+	state := &app{recovery: first, projectDirty: true, opts: filterOptions{preset: "中等"}}
 	if err := state.writeRecovery(); err != nil {
 		t.Fatal(err)
 	}

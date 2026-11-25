@@ -477,7 +477,7 @@ func (a *app) filter(items []*asset) {
 				}
 			})
 		}
-		status := batchStatus("过滤", fmt.Sprintf("已过滤 %d 个素材", succeeded), succeeded, failed, "详情见素材列表", ctx.Err() != nil)
+		status := batchStatus("过滤", fmt.Sprintf("已过滤 %d 个素材", succeeded), succeeded, failed, "可查看错误详情", ctx.Err() != nil)
 		a.win.Update(func() {
 			for _, item := range items {
 				item.analyzing = false
@@ -549,6 +549,78 @@ func batchStatus(action, completed string, succeeded, failed int, issue string, 
 		completed += fmt.Sprintf(" · %d 个素材失败 · %s", failed, issue)
 	}
 	return completed
+}
+
+func assetErrorText(item *asset) string {
+	if item == nil {
+		return ""
+	}
+	var details []string
+	if item.issue != "" && !item.pendingLoad {
+		details = append(details, "处理失败 · "+item.issue)
+	}
+	if item.exportIssue != "" {
+		details = append(details, "导出失败 · "+item.exportIssue)
+	}
+	return strings.Join(details, "\n")
+}
+
+func (a *app) errorReport() (int, string) {
+	var count int
+	var details []string
+	for _, item := range a.assets {
+		detail := assetErrorText(item)
+		if detail == "" {
+			continue
+		}
+		count++
+		if item.path != "" {
+			detail = "路径 · " + item.path + "\n" + detail
+		}
+		details = append(details, item.name+"\n"+detail)
+	}
+	return count, strings.Join(details, "\n\n")
+}
+
+func (a *app) showErrorDetails(message, detail string) {
+	if a.busy() || detail == "" {
+		return
+	}
+	a.picking = true
+	a.async(func() {
+		result, err := mygo.Dialog.Message(mygo.MessageOptions{
+			Parent: a.win, Type: mygo.MessageError, Title: title, Message: message, Detail: detail,
+			Buttons: []string{"复制错误", "关闭"}, DefaultButton: 1, CancelButton: 1,
+		})
+		a.win.Update(func() {
+			a.picking = false
+			if a.closing {
+				return
+			}
+			if err != nil {
+				a.status = err.Error()
+			} else if result.Button == 0 {
+				mygo.Clipboard.WriteText(detail)
+				a.status = "已复制错误详情"
+			}
+		})
+	})
+}
+
+func (a *app) showAssetError(item *asset) {
+	if detail := assetErrorText(item); detail != "" {
+		if item.path != "" {
+			detail = "路径 · " + item.path + "\n" + detail
+		}
+		a.showErrorDetails(item.name, detail)
+	}
+}
+
+func (a *app) showAllAssetErrors() {
+	count, detail := a.errorReport()
+	if count > 0 {
+		a.showErrorDetails(fmt.Sprintf("%d 个素材需要检查", count), detail)
+	}
 }
 
 func changed(before, after os.FileInfo) bool {
@@ -624,7 +696,7 @@ func (a *app) export(dir string) {
 				failed = append(failed, exportFailure{item: item.item, issue: err.Error()})
 			}
 		}
-		detail := "详情见素材列表"
+		detail := "可查看错误详情"
 		if failures == 0 {
 			detail = ""
 		}

@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  SILENCECUT_VERSION: ${{ github.ref_name }}
+  SILENCECUT_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
 jobs:
   windows:
@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -53,6 +54,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod

@@ -4,8 +4,15 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 work=${SILENCECUT_FFMPEG_WORK:-"$root/.ffmpeg"}
 dest="$root/dist"
-version=$(printf '%s\n' "${SILENCECUT_VERSION:-1.0.0}" | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+)([-+].*)?$/\1/p')
-version=${version:-1.0.0}
+version_input=${SILENCECUT_VERSION:-}
+if [ -z "$version_input" ]; then
+  version_input=$(git describe --tags --always --dirty 2>/dev/null || true)
+fi
+version=$(printf '%s\n' "$version_input" | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+)([-+].*)?$/\1/p')
+if [ -z "$version" ]; then
+  echo "Cannot derive a semantic version from: ${version_input:-no git tag or SILENCECUT_VERSION}" >&2
+  exit 1
+fi
 
 export CGO_ENABLED=1
 mkdir -p "$dest"

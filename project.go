@@ -152,7 +152,43 @@ func readProjectVersion(path string) (projectDocument, string, error) {
 			return doc, "", fmt.Errorf("素材记录无效 · %s", item.Path)
 		}
 	}
+	if err := validProjectDocument(doc); err != nil {
+		return doc, "", err
+	}
 	return doc, fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+func validProjectDocument(doc projectDocument) error {
+	if !slices.Contains(presets, doc.Preset) {
+		return fmt.Errorf("项目过滤预设无效 · %s", doc.Preset)
+	}
+	options := filterOptions{preset: doc.Preset, level: doc.Level, before: doc.Before, after: doc.After, ends: doc.Ends}
+	if _, err := options.settings(0); err != nil {
+		return fmt.Errorf("项目过滤设置无效 · %w", err)
+	}
+	if len(doc.Assets) == 0 {
+		if doc.Selected != -1 {
+			return fmt.Errorf("项目素材选择无效 · %d", doc.Selected)
+		}
+		if doc.Position != 0 || doc.ViewStart != 0 || doc.ViewLength != 0 || doc.Selection != (timeline.Span{}) {
+			return errors.New("空项目的编辑位置无效")
+		}
+		return nil
+	}
+	if doc.Selected < 0 || doc.Selected >= len(doc.Assets) {
+		return fmt.Errorf("项目素材选择无效 · %d", doc.Selected)
+	}
+	duration := doc.Assets[doc.Selected].Info.Duration
+	if doc.Position < 0 || doc.Position > duration ||
+		doc.ViewStart < 0 || doc.ViewStart > duration ||
+		doc.ViewLength < 0 || doc.ViewLength > duration-doc.ViewStart {
+		return errors.New("项目编辑位置超出素材范围")
+	}
+	if doc.Selection != (timeline.Span{}) &&
+		(doc.Selection.Start < 0 || doc.Selection.End <= doc.Selection.Start || doc.Selection.End > duration) {
+		return errors.New("项目选区超出素材范围")
+	}
+	return nil
 }
 
 func replaceProjectVersion(from, path, revision string) error {
@@ -260,18 +296,43 @@ func openRecoveryAt(dir string) (*recoveryFile, *recoveryFile, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, nil, err
 	}
-	files, err := filepath.Glob(filepath.Join(dir, "session-*"+projectExt))
+	entries, err := filepath.Glob(filepath.Join(dir, "session-*"))
 	if err != nil {
 		return nil, nil, err
 	}
-	var previous *recoveryFile
-	var newest time.Time
-	for _, path := range files {
-		info, err := os.Stat(path)
-		if err != nil || !info.ModTime().After(newest) {
+	type candidate struct {
+		path string
+		info os.FileInfo
+	}
+	var snapshots []candidate
+	for _, path := range entries {
+		if strings.HasSuffix(path, projectExt) {
+			info, statErr := os.Stat(path)
+			if statErr == nil {
+				snapshots = append(snapshots, candidate{path, info})
+			}
 			continue
 		}
-		f, err := os.OpenFile(strings.TrimSuffix(path, projectExt), os.O_RDWR, 0600)
+		if _, statErr := os.Stat(path + projectExt); !errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		f, openErr := os.OpenFile(path, os.O_RDWR, 0600)
+		if openErr != nil {
+			continue
+		}
+		if lockRecovery(f) == nil {
+			f.Close()
+			removeRecovery(path)
+		} else {
+			f.Close()
+		}
+	}
+	slices.SortFunc(snapshots, func(a, b candidate) int {
+		return b.info.ModTime().Compare(a.info.ModTime())
+	})
+	var previous *recoveryFile
+	for _, snapshot := range snapshots {
+		f, err := os.OpenFile(strings.TrimSuffix(snapshot.path, projectExt), os.O_RDWR, 0600)
 		if err != nil {
 			continue
 		}
@@ -279,10 +340,12 @@ func openRecoveryAt(dir string) (*recoveryFile, *recoveryFile, error) {
 			f.Close()
 			continue
 		}
-		if previous != nil {
-			previous.file.Close()
+		current := &recoveryFile{f}
+		if previous == nil {
+			previous = current
+		} else {
+			current.close(true)
 		}
-		previous, newest = &recoveryFile{f}, info.ModTime()
 	}
 	f, err := os.CreateTemp(dir, "session-*")
 	if err == nil {
@@ -405,14 +468,48 @@ func (a *app) saveProject(path string, create bool) error {
 	if err != nil {
 		return err
 	}
+	a.finishProjectSave(path, revision)
+	return nil
+}
+
+func (a *app) saveProjectAs(path string) error {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	revision, err := saveProjectFile(path, a.snapshot(path), publishProjectAs)
+	if err != nil {
+		return err
+	}
+	a.finishProjectSave(path, revision)
+	return nil
+}
+
+func publishProjectAs(from, to string) error {
+	if _, err := os.Stat(to); errors.Is(err, os.ErrNotExist) {
+		return createProject(from, to)
+	} else if err != nil {
+		return err
+	}
+	lock, err := lockProjectSave(to)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	return replaceProject(from, to)
+}
+
+func (a *app) finishProjectSave(path, revision string) {
 	a.projectPath, a.projectRevision, a.projectDirty = path, revision, false
 	a.clearRecovery()
 	a.refreshProjectTitle()
 	a.status = "已保存项目 · " + filepath.Base(path)
-	return nil
 }
 
 func (a *app) chooseNewProjectPath(done func()) {
+	if a.busy() || a.projectPath == "" && len(a.assets) == 0 && !a.projectDirty {
+		return
+	}
 	defaultPath := "未命名" + projectExt
 	if a.projectPath != "" {
 		defaultPath = strings.TrimSuffix(a.projectPath, filepath.Ext(a.projectPath)) + " 副本" + projectExt
@@ -433,7 +530,7 @@ func (a *app) chooseNewProjectPath(done func()) {
 				if !isProject(path) {
 					path += projectExt
 				}
-				if err := a.saveProject(path, true); err != nil {
+				if err := a.saveProjectAs(path); err != nil {
 					a.status = "无法保存项目 · " + err.Error()
 					return
 				}

@@ -385,6 +385,13 @@ func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
 			t.Fatalf("%s is not fully inside the editor column: %+v", label, r)
 		}
 	}
+	if err := view.RightClick("保存项目"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(view.Menu(), []string{"另存为…"}) {
+		t.Fatalf("save menu = %q", view.Menu())
+	}
+	view.CloseMenu()
 	if r, ok := view.Find("导出合并媒体"); !ok || r.X < width-settingsWidth || r.X+r.W > width {
 		t.Fatalf("export button is not above the inspector column: %+v", r)
 	}
@@ -402,6 +409,10 @@ func TestEmptyTopbarOmitsAppName(t *testing.T) {
 		if view.HasText(removed) {
 			t.Fatalf("removed topbar item %q is still visible", removed)
 		}
+	}
+	save, ok := view.AccessByRole(ui.RoleButton, "保存项目")
+	if !ok || !strings.Contains(save.Description, "另存为") || !strings.Contains(save.Description, "Shift+S") {
+		t.Fatalf("save-as shortcut is not exposed: %+v", save)
 	}
 }
 
@@ -866,18 +877,48 @@ func TestBatchStatusAndPublishedFolder(t *testing.T) {
 		t.Fatalf("missing canceling status: %v, %v", err, ctx.Err())
 	}
 	item.exportIssue = "文件丢失"
-	a.end(batchStatus("导出", "已导出 0 个文件", 0, 1, "详情见素材列表", false))
+	a.end(batchStatus("导出", "已导出 0 个文件", 0, 1, "可查看错误详情", false))
 	view.Frame()
-	if !view.HasText("导出失败 · 已导出 0 个文件 · 1 个素材失败 · 详情见素材列表") ||
-		!view.HasText("导出失败 · 文件丢失") || view.HasText("打开导出文件夹") {
+	if !view.HasText("导出失败 · 已导出 0 个文件 · 1 个素材失败 · 可查看错误详情") ||
+		!view.HasText("导出失败 · 文件丢失") || view.HasText("打开导出文件夹") ||
+		!view.HasText("查看错误详情") {
 		t.Fatal("failed export did not show the failure or exposed the folder prematurely")
 	}
 	a.publishedDir = a.outputDir
 	item.exportIssue = ""
-	a.status = batchStatus("导出", "已导出 1 个文件", 1, 1, "详情见素材列表", false)
+	a.status = batchStatus("导出", "已导出 1 个文件", 1, 1, "可查看错误详情", false)
 	view.Frame()
-	if !view.HasText("导出部分成功 · 已导出 1 个文件 · 1 个素材失败 · 详情见素材列表") || !view.HasText("打开导出文件夹") {
+	if !view.HasText("导出部分成功 · 已导出 1 个文件 · 1 个素材失败 · 可查看错误详情") || !view.HasText("打开导出文件夹") {
 		t.Fatal("partial export did not expose the result status and folder")
+	}
+}
+
+func TestAssetErrorReport(t *testing.T) {
+	a := &app{assets: []*asset{
+		{name: "待读取.wav", issue: "待读取素材", pendingLoad: true},
+		{name: "失败.wav", issue: "解码失败", exportIssue: "目标目录不可写"},
+	}}
+	count, detail := a.errorReport()
+	if count != 1 || !strings.Contains(detail, "失败.wav") ||
+		!strings.Contains(detail, "处理失败 · 解码失败") ||
+		!strings.Contains(detail, "导出失败 · 目标目录不可写") ||
+		strings.Contains(detail, "待读取.wav") {
+		t.Fatalf("error report = %d\n%s", count, detail)
+	}
+}
+
+func TestErrorDetailsStayVisibleAtMinimumSize(t *testing.T) {
+	item := &asset{name: "失败.wav", exportIssue: "目标目录不可写"}
+	a := &app{
+		assets: []*asset{item}, selected: item, opts: filterOptions{preset: "中等"},
+		status: "导出失败 · 已导出 0 个文件 · 1 个素材失败 · 可查看错误详情", publishedDir: t.TempDir(),
+	}
+	view := ui.NewTester(a.view, 930, 690)
+	for _, label := range []string{"查看错误详情", "打开导出文件夹"} {
+		r, ok := view.Find(label)
+		if !ok || r.X < 0 || r.X+r.W > 930 || r.Y < 0 || r.Y+r.H > 690 {
+			t.Fatalf("%q is outside the minimum window: %+v", label, r)
+		}
 	}
 }
 
@@ -987,6 +1028,19 @@ func TestAssetContextMenuStates(t *testing.T) {
 		want := []string{"在文件夹中显示", "复制路径", "-", "从列表移除"}
 		if !slices.Equal(view.Menu(), want) {
 			t.Fatalf("pending menu = %q, want %q", view.Menu(), want)
+		}
+	})
+
+	t.Run("error details", func(t *testing.T) {
+		item := &asset{path: "failed.wav", name: "失败.wav", exportIssue: "无法写入目标目录"}
+		a := &app{assets: []*asset{item}, selected: item, opts: filterOptions{preset: "中等"}}
+		view := ui.NewTester(a.view, 1180, 790)
+		if err := view.RightClick(item.name); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"在文件夹中显示", "复制路径", "查看错误详情…", "-", "重新过滤", "-", "从列表移除"}
+		if !slices.Equal(view.Menu(), want) {
+			t.Fatalf("error menu = %q, want %q", view.Menu(), want)
 		}
 	})
 }

@@ -21,6 +21,45 @@ import (
 
 func discardProgress(float64) {}
 
+func TestExportRetryPolicy(t *testing.T) {
+	const (
+		softwareMode        = int32(1)
+		hardwareEncoderMode = int32(2)
+		hardwareMode        = int32(3)
+		directMode          = int32(4)
+	)
+	decodeErr := videoPipelineError{errors.New("decode"), true}
+	encodeErr := videoPipelineError{errors.New("encode"), false}
+	plainErr := errors.New("write")
+	tests := []struct {
+		name       string
+		err        error
+		info       Info
+		mode       int32
+		skipGaps   bool
+		wantMode   int32
+		wantSkip   bool
+		wantFailed bool
+	}{
+		{"disable indexed seeks", errGapSeek, Info{Video: true}, directMode, true, directMode, false, false},
+		{"repeat seek failure", errGapSeek, Info{Video: true}, directMode, false, directMode, false, true},
+		{"decode fallback", decodeErr, Info{Video: true}, directMode, true, hardwareEncoderMode, true, false},
+		{"encoder fallback", encodeErr, Info{Video: true}, directMode, true, hardwareMode, true, false},
+		{"software encoder fallback", encodeErr, Info{Video: true}, hardwareEncoderMode, true, softwareMode, true, false},
+		{"software encoder failure", encodeErr, Info{Video: true}, softwareMode, true, softwareMode, true, true},
+		{"audio failure", plainErr, Info{}, softwareMode, true, softwareMode, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mode, skip, err := nextExportMode(tt.err, tt.info, tt.mode, tt.skipGaps)
+			if mode != tt.wantMode || skip != tt.wantSkip || (err != nil) != tt.wantFailed {
+				t.Fatalf("got mode=%d skip=%t err=%v, want mode=%d skip=%t failed=%t",
+					mode, skip, err, tt.wantMode, tt.wantSkip, tt.wantFailed)
+			}
+		})
+	}
+}
+
 func toneFixture(t *testing.T) string {
 	return stereoFixture(t, 12000, 0, func(int16) int16 { return 0 })
 }
