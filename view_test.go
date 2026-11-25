@@ -161,6 +161,53 @@ func TestCaptureVoiceWaveform(t *testing.T) {
 	}
 }
 
+func TestPendingWaveformIsReadOnly(t *testing.T) {
+	for _, size := range [][2]int{{930, 690}, {1180, 790}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			peaks := make([]timeline.Peak, 30*48000/timeline.PeakSamples)
+			for i := range peaks {
+				peak := int16(500 + 3500*math.Abs(math.Sin(float64(i)/31)*math.Cos(float64(i)/83)))
+				peaks[i] = timeline.Peak{Min: -peak, Max: peak}
+			}
+			info := media.Info{Duration: 90 * timeline.Second, Rate: 48000, Channels: 2, Video: true}
+			item := &asset{name: "录制.mp4", path: "recording.mp4", analyzing: true}
+			a := &app{assets: []*asset{item}, selected: item, cancel: func() {}, job: "过滤", opts: filterOptions{preset: "中等"}}
+			view := ui.NewTester(a.view, size[0], size[1])
+			if size[0] == 1180 {
+				view.SetPreferences(ui.Preferences{ReduceMotion: true})
+			}
+			if !view.HasText("正在分析素材…") {
+				t.Fatal("missing initial analysis status")
+			}
+			item.pendingWave = &analysisWave{info: info, wave: timeline.BuildWaveform(peaks)}
+			a.progress = .5
+			view.Frame()
+			view.Advance(revealDuration)
+			wave, ok := view.Find("正在分析的音频波形")
+			if !ok || wave.W <= 0 || wave.H <= 0 || wave.Y+wave.H > float32(size[1]) {
+				t.Fatalf("opening waveform lies outside the editor: %v", wave)
+			}
+			pixel := view.Image().RGBAAt(int(wave.X+wave.W/2), int(wave.Y+wave.H/2))
+			if pixel.G < 100 {
+				t.Fatalf("opening waveform was not drawn at the center: %v", pixel)
+			}
+			view.ClickAt(wave.X+wave.W/2, wave.Y+wave.H/2)
+			if a.position != 0 || len(a.snapshot("").Assets[0].Clips) != 0 || a.snapshot("").Assets[0].Info.Duration != 0 {
+				t.Fatal("pending waveform changed the edit or project")
+			}
+			if folder := os.Getenv("SILENCECUT_TEST_CAPTURE"); folder != "" {
+				saveView(t, view, filepath.Join(folder, fmt.Sprintf("analyzing-waveform-%d.png", size[0])))
+			}
+			item.info, item.waveform, item.pendingWave = info, item.pendingWave.wave, nil
+			item.analyzing, a.cancel = false, nil
+			view.Frame()
+			if _, ok := view.Find("音频波形和播放位置"); !ok {
+				t.Fatal("the completed waveform is missing")
+			}
+		})
+	}
+}
+
 func TestWorkspaceLayoutAndEdits(t *testing.T) {
 	for _, size := range [][2]int{{930, 690}, {1120, 790}, {1180, 790}, {1600, 900}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {

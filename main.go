@@ -81,6 +81,7 @@ type asset struct {
 	info        media.Info
 	peaks       []timeline.Peak
 	waveform    timeline.Waveform
+	pendingWave *analysisWave
 	automatic   float64
 	settings    timeline.Settings
 	history     timeline.History
@@ -91,6 +92,11 @@ type asset struct {
 	source      sourceStamp
 	offline     bool
 	pendingLoad bool
+}
+
+type analysisWave struct {
+	info media.Info
+	wave timeline.Waveform
 }
 
 type player interface {
@@ -421,7 +427,18 @@ func (a *app) filter(items []*asset) {
 			}
 			item := items[index]
 			update := func(value float64) { report((float64(index) + value) / float64(len(items))) }
-			err := current.filter(ctx, opts, update)
+			var preview func(media.Info, []timeline.Peak)
+			if current.info.Duration == 0 {
+				preview = func(info media.Info, peaks []timeline.Peak) {
+					wave := &analysisWave{info: info, wave: timeline.BuildWaveform(peaks)}
+					a.win.Update(func() {
+						if ctx.Err() == nil && item.analyzing {
+							item.pendingWave = wave
+						}
+					})
+				}
+			}
+			err := current.filter(ctx, opts, update, preview)
 			if err != nil && ctx.Err() != nil {
 				break
 			}
@@ -430,6 +447,7 @@ func (a *app) filter(items []*asset) {
 				failed++
 				a.win.Update(func() {
 					item.analyzing = false
+					item.pendingWave = nil
 					item.issue = err.Error()
 				})
 				continue
@@ -444,6 +462,7 @@ func (a *app) filter(items []*asset) {
 				}
 				item.info, item.peaks, item.automatic = current.info, current.peaks, current.automatic
 				item.waveform = current.waveform
+				item.pendingWave = nil
 				item.file, item.settings, item.history = current.file, current.settings, current.history
 				item.filtered, item.analyzing, item.issue, item.exportIssue = current.filtered, false, "", ""
 				item.offline = false
@@ -462,32 +481,35 @@ func (a *app) filter(items []*asset) {
 		a.win.Update(func() {
 			for _, item := range items {
 				item.analyzing = false
+				item.pendingWave = nil
 			}
 			a.end(status)
 		})
 	})
 }
 
-func (item *asset) filter(ctx context.Context, opts filterOptions, update media.Progress) error {
+func (item *asset) filter(ctx context.Context, opts filterOptions, update media.Progress, preview func(media.Info, []timeline.Peak)) error {
 	before, err := os.Stat(item.path)
 	if err != nil {
 		return err
 	}
-	if item.info.Duration == 0 || changed(item.file, before) {
-		info, peaks, err := media.Waveform(ctx, item.path, func(value float64) { update(value * .45) })
-		if err != nil {
-			return err
-		}
-		item.info, item.peaks = info, peaks
-		item.waveform = timeline.BuildWaveform(peaks)
-		item.automatic = timeline.AutomaticThreshold(peaks)
-	}
-	update(.45)
 	settings, err := opts.settings(item.automatic)
 	if err != nil {
 		return err
 	}
-	clips, err := media.Detect(ctx, item.path, settings, func(value float64) { update(.45 + value*.55) })
+	reload := item.info.Duration == 0 || changed(item.file, before)
+	var analysis media.AudioAnalysis
+	var clips []timeline.Clip
+	info := item.info
+	if reload {
+		analysis, err = media.AnalyzeAudio(ctx, item.path, settings, update, preview)
+		info, clips = analysis.Info, analysis.Clips
+		if settings.MinPause > 0 {
+			settings.Threshold = analysis.Automatic
+		}
+	} else {
+		clips, err = media.Detect(ctx, item.path, settings, update)
+	}
 	if err != nil {
 		return err
 	}
@@ -495,8 +517,19 @@ func (item *asset) filter(ctx context.Context, opts filterOptions, update media.
 	if err != nil {
 		return err
 	}
-	if changed(before, after) || !validProjectClips(clips, item.info.Duration) {
+	if changed(before, after) || !validProjectClips(clips, info.Duration) {
 		return errors.New("素材在过滤期间已改变，请重新过滤")
+	}
+	var wave timeline.Waveform
+	if reload {
+		wave = timeline.BuildWaveform(analysis.Peaks)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if reload {
+		item.info, item.peaks, item.automatic = info, analysis.Peaks, analysis.Automatic
+		item.waveform = wave
 	}
 	item.file, item.settings, item.filtered = after, settings, clips
 	item.history = timeline.History{Clips: clips}

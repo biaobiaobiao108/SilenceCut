@@ -15,13 +15,13 @@ import (
 	"silencecut/internal/timeline"
 )
 
-func TestFilterRejectsSourceChangeBetweenPasses(t *testing.T) {
+func TestFilterRejectsSourceChangeDuringAnalysis(t *testing.T) {
 	path := selectionExportFixture(t)
 	wav, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Replace the two-second fixture with one second after waveform analysis.
+	// Replace the two-second fixture with one second while it is being analyzed.
 	wav = wav[:44+48000*2]
 	binary.LittleEndian.PutUint32(wav[4:8], uint32(len(wav)-8))
 	binary.LittleEndian.PutUint32(wav[40:44], uint32(len(wav)-44))
@@ -29,17 +29,17 @@ func TestFilterRejectsSourceChangeBetweenPasses(t *testing.T) {
 	opts := filterOptions{preset: "中等"}
 	replaced := false
 	err = item.filter(t.Context(), opts, func(progress float64) {
-		if progress == .45 && !replaced {
+		if progress >= .45 && !replaced {
 			replaced = true
 			if err := os.WriteFile(path, wav, 0600); err != nil {
 				t.Fatal(err)
 			}
 		}
-	})
+	}, nil)
 	if !replaced || err == nil || len(item.history.Clips) != 0 {
 		t.Fatalf("source replaced = %t, filter error = %v, published cuts = %v", replaced, err, item.history.Clips)
 	}
-	if err := item.filter(t.Context(), opts, func(float64) {}); err != nil {
+	if err := item.filter(t.Context(), opts, func(float64) {}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if item.info.Duration != timeline.Second || !validProjectClips(item.history.Clips, item.info.Duration) {

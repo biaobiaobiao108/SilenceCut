@@ -6,8 +6,10 @@
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavutil/audio_fifo.h>
+#include <libavutil/cpu.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
+#include <libavutil/time.h>
 #include <libswscale/swscale.h>
 
 struct CutOutput {
@@ -26,6 +28,8 @@ struct CutOutput {
     enum AVColorTransferCharacteristic source_transfer;
     int64_t audio_pts, video_pts, video_end, video_final_pts, duration;
     int source_channels;
+    int profile_video;
+    int64_t readback_us, tone_map_us, video_encode_us;
 };
 
 static int add_stream(CutOutput *out, AVCodecContext *codec, AVStream **stream, AVDictionary **opts) {
@@ -76,6 +80,7 @@ static int is_hdr(enum AVColorTransferCharacteristic transfer) {
 }
 
 static int add_video(CutOutput *out, CutInput *in) {
+    out->profile_video = av_log_get_level() >= AV_LOG_VERBOSE;
 #ifdef _WIN32
     const char *name = "h264_mf";
 #else
@@ -219,6 +224,13 @@ static int encode(CutOutput *out, AVCodecContext *codec, AVStream *stream, AVFra
     }
 }
 
+static int encode_video(CutOutput *out, AVFrame *frame, int *video_error) {
+    int64_t started = out->profile_video ? av_gettime_relative() : 0;
+    int err = encode(out, out->video, out->video_stream, frame, video_error);
+    if (out->profile_video) out->video_encode_us += av_gettime_relative() - started;
+    return err;
+}
+
 static int write_audio(CutOutput *out, int final) {
     AVCodecContext *a = out->audio;
     int block = a->frame_size ? a->frame_size : 4096;
@@ -355,7 +367,10 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
             if (!out->download) out->download = av_frame_alloc();
             if (!out->download) return AVERROR(ENOMEM);
             av_frame_unref(out->download);
-            if ((err = av_hwframe_transfer_data(out->download, source, 0)) < 0) return err;
+            int64_t started = out->profile_video ? av_gettime_relative() : 0;
+            err = av_hwframe_transfer_data(out->download, source, 0);
+            if (out->profile_video) out->readback_us += av_gettime_relative() - started;
+            if (err < 0) return err;
             if ((err = av_frame_copy_props(out->download, source)) < 0) return err;
             source = out->download;
         }
@@ -366,6 +381,8 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
                 if (!out->tone_map) return AVERROR(ENOMEM);
                 out->tone_map->flags = SWS_BILINEAR;
                 out->tone_map->intent = SWS_INTENT_PERCEPTUAL;
+                if ((int64_t)v->width * v->height >= 1920 * 1080)
+                    out->tone_map->threads = av_clip(av_cpu_count(), 1, 8);
             }
             AVFrame input = *source;
             input.color_trc = transfer;
@@ -376,7 +393,9 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
             dest->color_trc = AVCOL_TRC_BT709;
             dest->colorspace = AVCOL_SPC_BT709;
             dest->color_range = AVCOL_RANGE_MPEG;
+            int64_t started = out->profile_video ? av_gettime_relative() : 0;
             err = sws_scale_frame(out->tone_map, dest, &input);
+            if (out->profile_video) out->tone_map_us += av_gettime_relative() - started;
         } else {
             out->scale = sws_getCachedContext(out->scale, source->width, source->height, source->format,
                                              dest->width, dest->height, dest->format, SWS_BILINEAR, NULL, NULL, NULL);
@@ -405,7 +424,7 @@ int cut_video(CutOutput *out, CutInput *in, int64_t pts, int64_t duration, int *
     out->video_pts = dest->pts;
     if (pts + duration == out->duration) out->video_final_pts = dest->pts;
     dest->duration = FFMAX(1, av_rescale_q(duration, AV_TIME_BASE_Q, v->time_base));
-    return encode(out, out->video, out->video_stream, dest, video_error);
+    return encode_video(out, dest, video_error);
 }
 
 int cut_finish(CutOutput *out, int *video_error) {
@@ -418,7 +437,10 @@ int cut_finish(CutOutput *out, int *video_error) {
     if (!out->audio_pts) return AVERROR_INVALIDDATA;
     if (out->video) {
         if (out->video_pts == AV_NOPTS_VALUE) return AVERROR_INVALIDDATA;
-        if ((err = encode(out, out->video, out->video_stream, NULL, video_error)) < 0) return err;
+        if ((err = encode_video(out, NULL, video_error)) < 0) return err;
+        if (out->profile_video)
+            av_log(out->video, AV_LOG_VERBOSE, "SilenceCut video timing: readback=%.3fs tone-map=%.3fs encode-and-write=%.3fs\n",
+                   out->readback_us / 1e6, out->tone_map_us / 1e6, out->video_encode_us / 1e6);
     }
     *video_error = 0;
     if ((err = encode(out, out->audio, out->audio_stream, NULL, NULL)) < 0) return err;

@@ -12,18 +12,19 @@ import (
 )
 
 const (
-	detailDefault = 30 * timeline.Second
-	detailMinimum = 2 * timeline.Second
-	rulerHeight   = 22
-	handleHeight  = 13
-	hitRadius     = 6
-	waveDragSlop  = 3
-	selectionGrip = 4
-	boundaryNudge = 100_000
-	seekInterval  = 33 * time.Millisecond
-	waveEdgeZone  = 24
-	wavePanTick   = 16 * time.Millisecond
-	wavePanRate   = .3
+	detailDefault     = 30 * timeline.Second
+	detailMinimum     = 2 * timeline.Second
+	rulerHeight       = 22
+	handleHeight      = 13
+	hitRadius         = 6
+	waveDragSlop      = 3
+	selectionGrip     = 4
+	boundaryNudge     = 100_000
+	seekInterval      = 33 * time.Millisecond
+	videoSeekInterval = 100 * time.Millisecond
+	waveEdgeZone      = 24
+	wavePanTick       = 16 * time.Millisecond
+	wavePanRate       = .3
 )
 
 var (
@@ -227,7 +228,8 @@ func (a *app) timeline(c *ui.Context) {
 					func() { a.setZoom(length * 2 / 3) })
 			})
 		})
-		if item.info.Video && !item.offline {
+		pending := item.pendingWave
+		if !item.offline && (item.info.Video || pending != nil && pending.info.Video) {
 			ui.Box(c.Key("video-preview")).Grow(1.15).MinHeight(120).Center().
 				Radius(surfaceRadius).Background(screen).BorderColor(border).BorderWidth(1).Clip().Children(func() {
 				ready := a.video != nil && a.video.Ready()
@@ -247,7 +249,7 @@ func (a *app) timeline(c *ui.Context) {
 						c.Invalidate()
 					}
 				}
-				if !ready {
+				if !ready && pending == nil {
 					ui.Column(c.Key("video-feedback")).Absolute().Left(0).Top(0).Right(0).Bottom(0).
 						Background(screen.Alpha(.72)).Center().Children(func() {
 						a.previewFeedback(c, item)
@@ -256,17 +258,33 @@ func (a *app) timeline(c *ui.Context) {
 			})
 		}
 		if duration == 0 {
-			ui.Column(c.Key("wave")).Grow(1).MinHeight(112).Padding(railInset).Radius(surfaceRadius).
-				Background(waveBack).BorderColor(border).BorderWidth(1).Center().Children(func() {
-				switch {
-				case item.analyzing:
-					ui.Text(c, "正在分析素材…").FontSize(13).TextColor(muted)
-				case item.issue != "":
-					ui.Text(c, item.issue).Wrap().FontSize(12).TextColor(waveRemovedInk)
-				default:
-					ui.Text(c, "素材待分析").FontSize(13).TextColor(muted)
-				}
-			})
+			placeholder := ui.Column(c.Key("wave")).Grow(1).MinHeight(112).Radius(surfaceRadius).
+				Background(waveBack).BorderColor(border).BorderWidth(1).Clip().Center()
+			if pending != nil {
+				placeholder.Label("正在分析的音频波形").Children(func() {
+					ui.Box(c.Key(item.path)).Fill().Transition(reveal(c, &ui.Motion{}, false)).
+						Draw(func(p *ui.Painter, r ui.Rect) {
+							span := timeline.Span{End: detailDefault}
+							body := ui.Rect{X: r.X, Y: r.Y + rulerHeight, W: r.W, H: r.H - rulerHeight}
+							mid := body.Y + body.H/2
+							drawTimeRuler(p, r, span)
+							p.Line(body.X, mid, body.X+body.W, mid, 1, border)
+							a.waveColumns = pending.wave.Columns(span, pending.info.Rate, max(1, int(body.W)), a.waveColumns)
+							drawEnvelope(p, body, a.waveColumns, pending.wave.Amplitude, func(float32) ui.Color { return waveOverview })
+						})
+				})
+			} else {
+				placeholder.Padding(railInset).Children(func() {
+					switch {
+					case item.analyzing:
+						ui.Text(c, "正在分析素材…").FontSize(13).TextColor(muted)
+					case item.issue != "":
+						ui.Text(c, item.issue).Wrap().FontSize(12).TextColor(waveRemovedInk)
+					default:
+						ui.Text(c, "素材待分析").FontSize(13).TextColor(muted)
+					}
+				})
+			}
 			ui.Box(c.Key("overview")).Height(28).Shrink(0).Radius(controlRadius).Background(waveBack).BorderColor(border).BorderWidth(1)
 		} else {
 			a.wave(c, item, duration, allowed)
@@ -536,7 +554,12 @@ func (a *app) updateWaveDrag(now time.Time, item *asset, x, w float32, length in
 	switch drag.kind {
 	case wavePlayhead, waveScrub:
 		a.position = max(0, min(duration, target))
-		if a.position != drag.end && (!pressed || drag.lastSeek.IsZero() || now.Sub(drag.lastSeek) >= seekInterval) {
+		interval := seekInterval
+		if item.info.Video {
+			// Give the native player time to present a frame during a scrub.
+			interval = videoSeekInterval
+		}
+		if a.position != drag.end && (!pressed || drag.lastSeek.IsZero() || now.Sub(drag.lastSeek) >= interval) {
 			a.seek(a.position)
 			drag.lastSeek, drag.end = now, a.position
 		}

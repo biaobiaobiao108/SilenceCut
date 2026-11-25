@@ -107,122 +107,6 @@ func open(ctx context.Context, path string, mode C.int, token *C.CutCancel) (*C.
 	return input, info, nil
 }
 
-func Waveform(ctx context.Context, path string, progress Progress) (Info, []timeline.Peak, error) {
-	token, release, err := mediaCancellation(ctx)
-	if err != nil {
-		return Info{}, nil, err
-	}
-	defer release()
-	in, info, err := open(ctx, path, C.CUT_AUDIO_ONLY, token)
-	if err != nil {
-		return Info{}, nil, err
-	}
-	defer C.cut_close(in)
-	var peaks []timeline.Peak
-	var until int64
-	err = frames(ctx, in, func(kind C.int, frame *C.CutFrame) (bool, error) {
-		if frame.samples == 0 {
-			return false, nil
-		}
-		start := audioFrameStart(sampleIndex(int64(frame.pts), info.Rate), until, info.Rate)
-		channels := info.Channels
-		pcm := unsafe.Slice((*float32)(unsafe.Pointer(frame.audio)), int(frame.samples)*channels)
-		end := start + int64(frame.samples)
-		for pos := max(until, start); pos < end; pos++ {
-			bin := int(pos / timeline.PeakSamples)
-			for len(peaks) <= bin {
-				peaks = append(peaks, timeline.Peak{})
-			}
-			peak := &peaks[bin]
-			offset := int(pos-start) * channels
-			for _, sample := range pcm[offset : offset+channels] {
-				value := int16(max(-32768, min(32767, float64(sample)*32768)))
-				peak.Min = min(peak.Min, value)
-				peak.Max = max(peak.Max, value)
-			}
-		}
-		until = max(until, end)
-		progress(fraction(int64(frame.pts), info.Duration))
-		return false, nil
-	})
-	if err == nil && len(peaks) == 0 {
-		err = errors.New("音轨没有可解码的数据")
-	}
-	return info, peaks, err
-}
-
-func Detect(ctx context.Context, path string, settings timeline.Settings, progress Progress) ([]timeline.Clip, error) {
-	token, release, err := mediaCancellation(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	in, info, err := open(ctx, path, C.CUT_AUDIO_ONLY, token)
-	if err != nil {
-		return nil, err
-	}
-	defer C.cut_close(in)
-	if settings.MinPause > 0 {
-		return detectPauses(ctx, in, info, settings, progress)
-	}
-	var gaps []timeline.Span
-	var cursor, quiet int64
-	var hasAudio bool
-	minQuiet := int64((info.Rate + 9) / 10)
-	threshold := float32(math.Pow(10, settings.Threshold/20))
-	toTime := func(sample int64) int64 {
-		return (sample*timeline.Second + int64(info.Rate)/2) / int64(info.Rate)
-	}
-	finishQuiet := func(end int64) {
-		if quiet >= minQuiet {
-			gaps = appendGap(gaps, toTime(cursor-quiet), end, info.Duration)
-		}
-		quiet = 0
-	}
-	err = frames(ctx, in, func(kind C.int, frame *C.CutFrame) (bool, error) {
-		if frame.samples == 0 {
-			return false, nil
-		}
-		start := audioFrameStart(sampleIndex(int64(frame.pts), info.Rate), cursor, info.Rate)
-		if start > cursor {
-			quiet += start - cursor
-			cursor = start
-		}
-		channels := info.Channels
-		pcm := unsafe.Slice((*float32)(unsafe.Pointer(frame.audio)), int(frame.samples)*channels)
-		for i := max(0, cursor-start); i < int64(frame.samples); i++ {
-			at := int(i) * channels
-			silent := true
-			for _, sample := range pcm[at : at+channels] {
-				if !(sample > -threshold && sample < threshold) {
-					silent = false
-					break
-				}
-			}
-			if silent {
-				quiet++
-			} else if quiet > 0 {
-				finishQuiet(toTime(cursor))
-			}
-			cursor++
-		}
-		hasAudio = true
-		progress(fraction(int64(frame.pts), info.Duration))
-		return false, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !hasAudio {
-		return nil, errors.New("音轨没有可解码的数据")
-	}
-	end := max(cursor, sampleIndex(info.Duration, info.Rate))
-	quiet += end - cursor
-	cursor = end
-	finishQuiet(info.Duration)
-	return timeline.Filter(info.Duration, gaps, settings), nil
-}
-
 func appendGap(gaps []timeline.Span, start, end, duration int64) []timeline.Span {
 	start, end = max(0, start), min(duration, end)
 	if end <= start {
@@ -236,11 +120,12 @@ func appendGap(gaps []timeline.Span, start, end, duration int64) []timeline.Span
 }
 
 func frames(ctx context.Context, in *C.CutInput, process func(C.int, *C.CutFrame) (bool, error)) error {
+	var frame C.CutFrame
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var frame C.CutFrame
+		frame = C.CutFrame{}
 		kind := C.cut_next(in, &frame)
 		if err := ctx.Err(); err != nil {
 			return err

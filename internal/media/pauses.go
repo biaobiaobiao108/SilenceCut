@@ -1,15 +1,8 @@
 package media
 
-/*
-#include "ffmpeg.h"
-*/
-import "C"
-
 import (
 	"context"
-	"errors"
 	"math"
-	"unsafe"
 
 	"silencecut/internal/timeline"
 )
@@ -19,70 +12,65 @@ type pauseWindow struct {
 	pitch                    int
 }
 
-func detectPauses(ctx context.Context, in *C.CutInput, info Info, settings timeline.Settings, progress Progress) ([]timeline.Clip, error) {
-	rate, channels := info.Rate, info.Channels
-	windowSize := (rate + 39) / 40 // 25 ms, rounded up to a whole sample
-	limit := sampleIndex(info.Duration, rate)
-	buffer := make([]float32, windowSize*channels)
-	stride := max(1, rate/4000)
-	pitch := make([]float64, windowSize/stride)
-	var windows []pauseWindow
-	var cursor, decodedEnd int64
-	var received bool
-	consume := func(count int64, pcm []float32) {
-		for count > 0 && ctx.Err() == nil {
-			offset := int(cursor % int64(windowSize))
-			width := min(int64(windowSize-offset), count)
-			dst := buffer[offset*channels : (offset+int(width))*channels]
-			if pcm == nil {
-				clear(dst)
+type pauseDetector struct {
+	info               Info
+	windowSize, stride int
+	limit, cursor      int64
+	buffer             []float32
+	pitch              []float64
+	windows            []pauseWindow
+}
+
+func newPauseDetector(info Info) *pauseDetector {
+	windowSize := (info.Rate + 39) / 40 // 25 ms, rounded up to a whole sample
+	stride := max(1, info.Rate/4000)
+	return &pauseDetector{
+		info: info, windowSize: windowSize, stride: stride,
+		limit: sampleIndex(info.Duration, info.Rate), buffer: make([]float32, windowSize*info.Channels),
+		pitch: make([]float64, windowSize/stride),
+	}
+}
+
+func (d *pauseDetector) consume(ctx context.Context, count int64, pcm []float32) {
+	channels := d.info.Channels
+	for count > 0 && ctx.Err() == nil {
+		offset := int(d.cursor % int64(d.windowSize))
+		width := min(int64(d.windowSize-offset), count)
+		dst := d.buffer[offset*channels : (offset+int(width))*channels]
+		if pcm == nil {
+			clear(dst)
+		} else {
+			copy(dst, pcm[:len(dst)])
+			pcm = pcm[len(dst):]
+		}
+		d.cursor += width
+		count -= width
+		if d.cursor%int64(d.windowSize) == 0 || d.cursor == d.limit {
+			if pcm == nil && offset == 0 {
+				d.windows = append(d.windows, pauseWindow{level: -120, voicedLevel: -120, peak: -120})
 			} else {
-				copy(dst, pcm[:len(dst)])
-				pcm = pcm[len(dst):]
-			}
-			cursor += width
-			count -= width
-			if cursor%int64(windowSize) == 0 || cursor == limit {
-				if pcm == nil && offset == 0 {
-					windows = append(windows, pauseWindow{level: -120, voicedLevel: -120, peak: -120})
-				} else {
-					windows = append(windows, describePauseWindow(buffer[:(offset+int(width))*channels], pitch, rate, stride, channels))
-				}
+				d.windows = append(d.windows, describePauseWindow(d.buffer[:(offset+int(width))*channels],
+					d.pitch, d.info.Rate, d.stride, channels))
 			}
 		}
 	}
-	err := frames(ctx, in, func(_ C.int, frame *C.CutFrame) (bool, error) {
-		if frame.samples == 0 {
-			return false, nil
-		}
-		received = true
-		start := audioFrameStart(sampleIndex(int64(frame.pts), rate), decodedEnd, rate)
-		end := start + int64(frame.samples)
-		decodedEnd = max(decodedEnd, end)
-		if start > cursor {
-			consume(min(limit, start)-cursor, nil)
-		}
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if end = min(end, limit); end > cursor {
-			pcm := unsafe.Slice((*float32)(unsafe.Pointer(frame.audio)), int(frame.samples)*channels)
-			consume(end-cursor, pcm[int(cursor-start)*channels:int(end-start)*channels])
-		}
-		progress(fraction(cursor, limit))
-		return cursor == limit, nil
-	})
-	if err != nil {
-		return nil, err
+}
+
+func (d *pauseDetector) add(ctx context.Context, start int64, pcm []float32) {
+	channels := d.info.Channels
+	d.consume(ctx, min(d.limit, start)-d.cursor, nil)
+	end := min(d.limit, start+int64(len(pcm)/channels))
+	if end > start {
+		d.consume(ctx, end-start, pcm[:int(end-start)*channels])
 	}
-	if !received {
-		return nil, errors.New("音轨没有可解码的数据")
-	}
-	consume(limit-cursor, nil)
+}
+
+func (d *pauseDetector) clips(ctx context.Context, settings timeline.Settings) ([]timeline.Clip, error) {
+	d.consume(ctx, d.limit-d.cursor, nil)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
+	info, windows := d.info, d.windows
 	reference, hasVoice := speechLevel(windows, settings.Threshold)
 	voiceFloor := max(-95, min(reference-28, float32(settings.Threshold)-8))
 	clearVoice := reference - 18
@@ -94,7 +82,7 @@ func detectPauses(ctx context.Context, in *C.CutInput, info Info, settings timel
 		minimum = max(minimum, 100_000)
 	}
 	at := func(i int) int64 {
-		return min(info.Duration, int64(math.Round(float64(i)*float64(windowSize)*float64(timeline.Second)/float64(rate))))
+		return min(info.Duration, int64(math.Round(float64(i)*float64(d.windowSize)*float64(timeline.Second)/float64(info.Rate))))
 	}
 	var gaps []timeline.Span
 	start := 0

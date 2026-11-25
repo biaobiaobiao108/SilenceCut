@@ -131,6 +131,85 @@ func TestCancelWaveformAndPadding(t *testing.T) {
 	}
 }
 
+func checkCombinedAnalysis(t *testing.T, source string) {
+	t.Helper()
+	ctx := t.Context()
+	info, peaks, err := Waveform(ctx, source, discardProgress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	automatic := timeline.AutomaticThreshold(peaks)
+	for _, settings := range []timeline.Settings{
+		{Threshold: -40},
+		{Threshold: -65, OnlyEnds: true},
+		{MinPause: 280_000, Before: 100_000, After: 120_000, BreathMargin: 10},
+		{MinPause: 200_000, Before: 65_000, After: 80_000, BreathMargin: 7},
+		{MinPause: 140_000, Before: 35_000, After: 50_000, BreathMargin: 4},
+	} {
+		want := settings
+		if want.MinPause > 0 {
+			want.Threshold = automatic
+		}
+		clips, err := Detect(ctx, source, want, discardProgress)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := AnalyzeAudio(ctx, source, settings, discardProgress, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Info != info || result.Automatic != automatic || !reflect.DeepEqual(result.Peaks, peaks) {
+			t.Fatalf("combined analysis changed the metadata, waveform or automatic threshold")
+		}
+		if !reflect.DeepEqual(result.Clips, clips) {
+			t.Fatalf("settings %+v: combined cuts %v, separate cuts %v", settings, result.Clips, clips)
+		}
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	defer cancel()
+	result, err := AnalyzeAudio(canceled, source, timeline.Settings{MinPause: 200_000}, func(float64) { cancel() }, nil)
+	if !errors.Is(err, context.Canceled) || len(result.Clips) != 0 {
+		t.Fatalf("canceled combined analysis published cuts %v, error %v", result.Clips, err)
+	}
+}
+
+func TestAudioAnalysisPublishesOpeningWave(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "long-audio.wav")
+	out, err := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+		"sine=frequency=440:sample_rate=8000:duration=32", source).CombinedOutput()
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			t.Skip("ffmpeg CLI is used to generate a WAV fixture")
+		}
+		t.Fatalf("fixture: %v\n%s", err, out)
+	}
+	var opening []timeline.Peak
+	result, err := AnalyzeAudio(t.Context(), source, timeline.Settings{Threshold: -40},
+		func(progress float64) {
+			// Keep the task running long enough to exercise the delayed preview.
+			if progress == 0 {
+				time.Sleep(250 * time.Millisecond)
+			}
+		}, func(info Info, peaks []timeline.Peak) {
+			if opening != nil || info.Duration != 32*timeline.Second {
+				t.Fatalf("unexpected opening preview: %+v", info)
+			}
+			opening = peaks
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := (30*8000 + timeline.PeakSamples - 1) / timeline.PeakSamples
+	if len(opening) != want || !reflect.DeepEqual(opening, result.Peaks[:want]) {
+		t.Fatalf("opening waveform contains %d bins, want %d", len(opening), want)
+	}
+	before := result.Peaks[0]
+	opening[0] = timeline.Peak{}
+	if result.Peaks[0] != before {
+		t.Fatal("opening waveform shares storage with the completed waveform")
+	}
+}
+
 func TestAutomaticDetectionUsesAllChannels(t *testing.T) {
 	for _, tt := range []struct {
 		name             string
@@ -145,6 +224,7 @@ func TestAutomaticDetectionUsesAllChannels(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			path := stereoFixture(t, tt.peak, tt.background, tt.right)
+			checkCombinedAnalysis(t, path)
 			_, peaks, err := Waveform(ctx, path, discardProgress)
 			if err != nil {
 				t.Fatal(err)
@@ -204,6 +284,7 @@ func TestDetectFrameBoundaries(t *testing.T) {
 			if kept := timeline.Kept(clips); !reflect.DeepEqual(kept, tc.kept) {
 				t.Fatalf("retained %v, want %v", kept, tc.kept)
 			}
+			checkCombinedAnalysis(t, source)
 		})
 	}
 }
@@ -371,7 +452,7 @@ func TestHDRExportToneMapsPixels(t *testing.T) {
 			dir := t.TempDir()
 			source := filepath.Join(dir, "hdr.mp4")
 			out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i",
-				"nullsrc=s=320x240:r=12:d=1,format=yuv420p10le,geq=lum=723:cb=512:cr=512",
+				"nullsrc=s=1920x1080:r=12:d=1,format=yuv420p10le,geq=lum='if(lt(X,640),350,if(lt(X,1280),723,900))':cb=512:cr=512",
 				"-f", "lavfi", "-i", "sine=d=1", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
 				"-x264-params", "colorprim=bt2020:transfer="+transfer+":colormatrix=bt2020nc",
 				"-color_primaries", "bt2020",
@@ -391,17 +472,25 @@ func TestHDRExportToneMapsPixels(t *testing.T) {
 			}
 			pixels, err := exec.Command(ffmpeg, "-v", "error", "-i", path, "-map", "0:v:0",
 				"-frames:v", "1", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-").Output()
-			const size = 320 * 240
+			const size = 1920 * 1080
 			if err != nil || len(pixels) < size {
 				t.Fatalf("decode SDR pixels: %v, %d bytes", err, len(pixels))
 			}
-			var sum int
-			for _, pixel := range pixels[:size] {
-				sum += int(pixel)
+			var levels [3]int
+			for y := 30; y < 1080; y += 60 {
+				for band := range levels {
+					levels[band] += int(pixels[y*1920+band*640+320])
+				}
+			}
+			for band := range levels {
+				levels[band] /= 18
+			}
+			if levels[0]+15 >= levels[1] || levels[1]+10 >= levels[2] {
+				t.Fatalf("HDR tone mapping lost separation between levels: %v", levels)
 			}
 			// A bit-depth-only conversion would leave the luma near 181.
-			if mean := sum / size; mean >= 176 && mean <= 186 {
-				t.Fatalf("luma still looks like quantized HDR: %d", mean)
+			if levels[1] >= 176 && levels[1] <= 186 {
+				t.Fatalf("luma still looks like quantized HDR: %v", levels)
 			}
 		})
 	}
@@ -622,6 +711,70 @@ func TestIndexedExportMatchesSequential(t *testing.T) {
 		t.Fatalf("seeking changed decoded video: SSIM %f (%v)", score, err)
 	}
 
+}
+
+func BenchmarkAudioAnalysis(b *testing.B) {
+	source := os.Getenv("SILENCECUT_TEST_AUDIO")
+	if source == "" {
+		b.Skip("set SILENCECUT_TEST_AUDIO to an audio or video file with speech")
+	}
+	_, peaks, err := Waveform(b.Context(), source, discardProgress)
+	if err != nil {
+		b.Fatal(err)
+	}
+	automatic := timeline.AutomaticThreshold(peaks)
+	b.Run("decode", func(b *testing.B) {
+		for b.Loop() {
+			if _, err := analyzeAudio(b.Context(), source, false, nil, discardProgress, nil); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("waveform", func(b *testing.B) {
+		for b.Loop() {
+			if _, _, err := Waveform(b.Context(), source, discardProgress); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	for _, mode := range []struct {
+		name     string
+		settings timeline.Settings
+	}{
+		{"preset", timeline.Settings{Threshold: automatic, MinPause: 200_000, Before: 65_000, After: 80_000, BreathMargin: 7}},
+		{"custom", timeline.Settings{Threshold: -40, Before: 65_000, After: 80_000}},
+	} {
+		b.Run(mode.name+"/refilter", func(b *testing.B) {
+			for b.Loop() {
+				if _, err := Detect(b.Context(), source, mode.settings, discardProgress); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(mode.name+"/separate", func(b *testing.B) {
+			for b.Loop() {
+				_, peaks, err := Waveform(b.Context(), source, discardProgress)
+				if err != nil {
+					b.Fatal(err)
+				}
+				threshold := timeline.AutomaticThreshold(peaks)
+				settings := mode.settings
+				if settings.MinPause > 0 {
+					settings.Threshold = threshold
+				}
+				if _, err := Detect(b.Context(), source, settings, discardProgress); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(mode.name+"/combined", func(b *testing.B) {
+			for b.Loop() {
+				if _, err := AnalyzeAudio(b.Context(), source, mode.settings, discardProgress, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
 
 func BenchmarkLongVideoExport(b *testing.B) {

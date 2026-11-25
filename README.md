@@ -6,6 +6,7 @@
 - 三档预设会参考素材自身的音量和周期性，优先保留有声对白。贴着字音的气口和接近对白音量的呼吸声仍可能保留，可试听后调整。「自定义」按指定音量阈值和留白检测静音。
 
 - 主波形默认显示 30 秒，可用滑杆和加减按钮缩放。点击下方全局波形定位，拖动框出的区域浏览其他时间段。
+- 较长素材在首次分析时会先显示开头的波形。分析完成后可试听、编辑和导出。
 - 素材行和主波形支持右键、macOS Control-click、菜单键和 Shift+F10。右键素材行会先选中该素材；右键主波形会把游标移到点击位置并保留当前选区。
 - 直接拖动播放游标的顶部手柄或竖线，按 Escape 可恢复拖动前的位置。点击波形空白处定位，从空白处拖动可框选区间。用「保留」或「移除」修改选区或游标所在片段。拖动波形上沿的边界手柄可调整片段，改动可撤销。聚焦波形后，Alt+左右方向键可微调当前片段起点，Alt+Shift+左右方向键可微调终点。
 - 播放键或空格默认试听「过滤后」的结果。音频用内置 FFmpeg 流式解码并跳过移除段，环绕声音轨以立体声试听。视频用系统播放器近似跳过切点，密集切点处可能提前跳转或短暂停顿，准确结果以导出文件为准。点「原始」可连续播放完整素材。
@@ -50,11 +51,25 @@ sh scripts/package.sh
 
 发布包位于 `dist/`。窗口与发布包图标均来自 `assets/silencecut.svg`。编译 Go 时通过 `CGO_CFLAGS` 和 `CGO_LDFLAGS` 指向对应架构 SDK 的 `include` 和 `lib`。运行 Windows 测试时还需将 SDK 的 `bin` 加入 PATH。应用运行不需要系统安装 FFmpeg。
 
-排查视频导出时，可在启动应用前设置 `SILENCECUT_VIDEO_ACCELERATION=software`，使用软件编解码路径。设置 `SILENCECUT_FFMPEG_DEBUG=1` 可在标准错误中查看帧传输方式、回退原因、定位次数和解码帧数。
+排查视频导出时，可在启动应用前设置 `SILENCECUT_VIDEO_ACCELERATION=software`，使用软件编解码路径。设置 `SILENCECUT_FFMPEG_DEBUG=1` 可在标准错误中查看帧传输方式、回退原因、定位次数、解码帧数，以及帧回读、色调映射和视频编码写包的耗时。
 
 ## 验证
 
-设置 `SILENCECUT_TEST_VIDEO` 指向一段至少一分钟、带有停顿的本地视频后，可用下面的命令比较默认和强制软件的视频导出路径。`ffprobe` 会核对导出文件的时长。Windows 需要加上 `-tags mygo_nowebview`。
+Windows 上运行以下基准时需要加上 `-tags mygo_nowebview`。
+
+将 `SILENCECUT_TEST_AUDIO` 指向长口播音频或视频，可比较波形、重新过滤、两次解码和单次解码的耗时及 Go 内存分配。
+
+```sh
+go test -run '^$' -bench '^BenchmarkAudioAnalysis$' -benchmem -benchtime=1x -count=5 ./internal/media
+```
+
+设置 `SILENCECUT_BENCH_PREVIEW=1` 后，预览基准会生成长 GOP 素材，测量系统播放器从定位请求到目标画面出现的耗时。需要带 `libx264` 的本机 FFmpeg。
+
+```sh
+go test -run '^$' -bench '^BenchmarkNativeVideoSeek$' -benchtime=5x .
+```
+
+设置 `SILENCECUT_TEST_VIDEO` 指向一段至少一分钟、带有停顿的本地视频后，可用下面的命令比较默认和强制软件的视频导出路径。`ffprobe` 会核对导出文件的时长。
 
 ```sh
 go test -run '^$' -bench '^BenchmarkLongVideoExport$' -benchtime=1x ./internal/media
