@@ -145,7 +145,7 @@ func TestCaptureVoiceWaveform(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	a := &app{assets: []*asset{item}, selected: item, player: p, position: 17 * timeline.Second, opts: filterOptions{preset: "慢"}}
+	a := &app{assets: []*asset{item}, selected: item, previewState: previewState{player: p}, timelineState: timelineState{position: 17 * timeline.Second}, opts: filterOptions{preset: "慢"}}
 	view := ui.NewTester(a.view, 1180, 790)
 	if len(clips) < 3 || info.Duration < 300*timeline.Second {
 		t.Fatalf("expected a long recording with detected pauses, got %+v in %d µs at %.1f dB", clips, info.Duration, level)
@@ -171,7 +171,7 @@ func TestPendingWaveformIsReadOnly(t *testing.T) {
 			}
 			info := media.Info{Duration: 90 * timeline.Second, Rate: 48000, Channels: 2, Video: true}
 			item := &asset{name: "录制.mp4", path: "recording.mp4", analyzing: true}
-			a := &app{assets: []*asset{item}, selected: item, cancel: func() {}, job: "过滤", opts: filterOptions{preset: "中等"}}
+			a := &app{assets: []*asset{item}, selected: item, jobState: jobState{cancel: func() {}, job: "过滤"}, opts: filterOptions{preset: "中等"}}
 			view := ui.NewTester(a.view, size[0], size[1])
 			if size[0] == 1180 {
 				view.SetPreferences(ui.Preferences{ReduceMotion: true})
@@ -369,7 +369,7 @@ func TestTopbarActionsStayInsidePanelColumns(t *testing.T) {
 	item := &asset{name: "项目旁白.wav", info: media.Info{Duration: 5 * timeline.Second}}
 	projectPath := filepath.Join(t.TempDir(), "一个非常长的项目名称用于检查顶栏项目区不会挤过分界线.silencecut")
 	a := &app{
-		assets: []*asset{item}, selected: item, projectPath: projectPath, projectDirty: true,
+		assets: []*asset{item}, selected: item, projectState: projectState{projectPath: projectPath, projectDirty: true},
 		opts: filterOptions{preset: "慢"},
 	}
 	view := ui.NewTester(a.view, width, height)
@@ -472,7 +472,7 @@ func TestPlayheadAndBoundaryGestures(t *testing.T) {
 	}}}
 	p := &dragPreview{seeks: []int64{10 * second}}
 	selection := timeline.Span{Start: 7 * second, End: 8 * second}
-	a := &app{selected: item, player: p, position: 10 * second, selection: selection, viewStart: 5 * second, viewLength: 15 * second}
+	a := &app{selected: item, previewState: previewState{player: p}, timelineState: timelineState{position: 10 * second, selection: selection, viewStart: 5 * second, viewLength: 15 * second}}
 	view := ui.NewTester(a.view, 1180, 790)
 	wave, _ := view.Find("音频波形和播放位置")
 	x := func(s float32) float32 { return wave.X + wave.W*(s-5)/15 }
@@ -583,7 +583,7 @@ func TestPlayheadDragPansTimelineAtEdges(t *testing.T) {
 	const second = timeline.Second
 	duration := int64(120) * second
 	item := &asset{info: media.Info{Duration: duration}}
-	a := &app{selected: item, position: 35 * second, viewStart: 20 * second, viewLength: 30 * second}
+	a := &app{selected: item, timelineState: timelineState{position: 35 * second, viewStart: 20 * second, viewLength: 30 * second}}
 	view := ui.NewTester(a.view, 1180, 790)
 	wave, _ := view.Find("音频波形和播放位置")
 	body := wave.Y + wave.H/2
@@ -627,7 +627,7 @@ func TestWaveSelectionManipulation(t *testing.T) {
 		{Span: timeline.Span{Start: 10 * s, End: 30 * s}},
 	}}}
 	p := &dragPreview{seeks: []int64{10 * s}}
-	a := &app{selected: item, player: p, position: 10 * s}
+	a := &app{selected: item, previewState: previewState{player: p}, timelineState: timelineState{position: 10 * s}}
 	view := ui.NewTester(a.view, 1180, 790)
 	wave, _ := view.Find("音频波形和播放位置")
 	x := func(at float32) float32 { return wave.X + wave.W*at/30 }
@@ -725,7 +725,7 @@ func TestWaveSelectionEdgePanAndOverview(t *testing.T) {
 	const s = timeline.Second
 	item := &asset{info: media.Info{Duration: 120 * s}}
 	selection := timeline.Span{Start: 25 * s, End: 30 * s}
-	a := &app{selected: item, position: 33 * s, selection: selection, viewStart: 20 * s, viewLength: 30 * s}
+	a := &app{selected: item, timelineState: timelineState{position: 33 * s, selection: selection, viewStart: 20 * s, viewLength: 30 * s}}
 	view := ui.NewTester(a.view, 1180, 790)
 	wave, _ := view.Find("音频波形和播放位置")
 	y := wave.Y + wave.H/2
@@ -767,7 +767,7 @@ func TestKeyboardBoundaryNudging(t *testing.T) {
 		{Span: timeline.Span{Start: 10 * second, End: 15 * second}},
 		{Span: timeline.Span{Start: 15 * second, End: 30 * second}, Keep: true},
 	}}}
-	a := &app{selected: item, position: 12 * second, viewStart: 5 * second, viewLength: 15 * second}
+	a := &app{selected: item, timelineState: timelineState{position: 12 * second, viewStart: 5 * second, viewLength: 15 * second}}
 	view := ui.NewTester(a.view, 1180, 790)
 	wave, _ := view.Find("音频波形和播放位置")
 	x := func(s float32) float32 { return wave.X + wave.W*(s-5)/15 }
@@ -792,8 +792,8 @@ func TestSettingsDraftAndRefilterConfirmation(t *testing.T) {
 	first := &asset{name: "第一段.wav", path: "first", info: media.Info{Duration: 5 * timeline.Second}, filtered: clips,
 		history: timeline.History{Clips: clips}}
 	second := &asset{name: "第二段.wav", path: "second", filtered: clips, history: timeline.History{Clips: clips}}
-	a := &app{assets: []*asset{first, second}, selected: first, position: 700_000, viewLength: 2 * timeline.Second,
-		selection: timeline.Span{Start: 1, End: 900_000}, opts: filterOptions{preset: "自定义", level: "-40", before: "错", after: "0.1"}}
+	a := &app{assets: []*asset{first, second}, selected: first, timelineState: timelineState{position: 700_000, viewLength: 2 * timeline.Second,
+		selection: timeline.Span{Start: 1, End: 900_000}}, opts: filterOptions{preset: "自定义", level: "-40", before: "错", after: "0.1"}}
 	view := ui.NewTesterWith(a.view, 930, 690, ui.TesterOptions{Preferences: ui.Preferences{ReduceMotion: true}})
 	click := func(label string) {
 		t.Helper()
@@ -863,7 +863,7 @@ func TestProjectSourceRowsAndResume(t *testing.T) {
 func TestBatchStatusAndPublishedFolder(t *testing.T) {
 	item := &asset{name: "失败.wav", info: media.Info{Duration: 5 * timeline.Second},
 		history: timeline.History{Clips: []timeline.Clip{{Span: timeline.Span{End: 5 * timeline.Second}, Keep: true}}}}
-	a := &app{outputDir: t.TempDir(), assets: []*asset{item}, selected: item}
+	a := &app{jobState: jobState{outputDir: t.TempDir()}, assets: []*asset{item}, selected: item}
 	view := ui.NewTester(a.view, 1180, 790)
 	if view.HasText("打开导出文件夹") {
 		t.Fatal("choosing a folder must not count as writing files")
@@ -911,7 +911,7 @@ func TestErrorDetailsStayVisibleAtMinimumSize(t *testing.T) {
 	item := &asset{name: "失败.wav", exportIssue: "目标目录不可写"}
 	a := &app{
 		assets: []*asset{item}, selected: item, opts: filterOptions{preset: "中等"},
-		status: "导出失败 · 已导出 0 个文件 · 1 个素材失败 · 可查看错误详情", publishedDir: t.TempDir(),
+		jobState: jobState{status: "导出失败 · 已导出 0 个文件 · 1 个素材失败 · 可查看错误详情", publishedDir: t.TempDir()},
 	}
 	view := ui.NewTester(a.view, 930, 690)
 	for _, label := range []string{"查看错误详情", "打开导出文件夹"} {
@@ -926,7 +926,7 @@ func TestOriginalVideoPreviewError(t *testing.T) {
 	item := &asset{info: media.Info{Duration: 2 * timeline.Second, Video: true}}
 	a := &app{
 		assets: []*asset{item}, selected: item, opts: filterOptions{preset: "慢"},
-		previewIssue: "无法播放原片",
+		previewState: previewState{previewIssue: "无法播放原片"},
 	}
 	view := ui.NewTester(a.view, 930, 690)
 	if !view.HasText("无法播放原片") {
@@ -986,7 +986,7 @@ func TestAssetContextMenuStates(t *testing.T) {
 
 	t.Run("busy loaded", func(t *testing.T) {
 		item := &asset{path: "busy.wav", name: "忙碌.wav"}
-		a := &app{assets: []*asset{item}, selected: item, picking: true, opts: filterOptions{preset: "中等"}}
+		a := &app{assets: []*asset{item}, selected: item, jobState: jobState{picking: true}, opts: filterOptions{preset: "中等"}}
 		view := ui.NewTester(a.view, 1180, 790)
 		if err := view.RightClick(item.name); err != nil {
 			t.Fatal(err)
@@ -1054,8 +1054,8 @@ func TestWaveContextMenu(t *testing.T) {
 	}
 	item := &asset{info: media.Info{Duration: 30 * second, Video: true}, history: timeline.History{Clips: slices.Clone(initial)}}
 	p := &dragPreview{seeks: []int64{18 * second}}
-	a := &app{selected: item, player: p, position: 10 * second,
-		selection: timeline.Span{Start: 7 * second, End: 8 * second}, viewStart: 5 * second, viewLength: 15 * second}
+	a := &app{selected: item, previewState: previewState{player: p}, timelineState: timelineState{position: 10 * second,
+		selection: timeline.Span{Start: 7 * second, End: 8 * second}, viewStart: 5 * second, viewLength: 15 * second}}
 	view := ui.NewTester(a.view, 1180, 790)
 	wave, _ := view.Find("音频波形和播放位置")
 	x := func(at float32) float32 { return wave.X + wave.W*(at-5)/15 }

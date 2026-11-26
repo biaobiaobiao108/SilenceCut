@@ -51,7 +51,7 @@ func TestFilterRejectsSourceChangeDuringAnalysis(t *testing.T) {
 func TestCloseWaitsForActiveJobBeforePrompting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	state := &app{projectDirty: true, cancel: cancel}
+	state := &app{projectState: projectState{projectDirty: true}, jobState: jobState{cancel: cancel}}
 	if state.requestClose() || !state.closePending || ctx.Err() != context.Canceled {
 		t.Fatal("closing a dirty project must wait for the canceled job")
 	}
@@ -71,9 +71,11 @@ func TestProjectRoundTrip(t *testing.T) {
 	item := &asset{path: source, file: file, info: media.Info{Duration: baseline[0].End, Rate: 48000, Channels: 1},
 		filtered: baseline, history: timeline.History{Clips: baseline}}
 	a := &app{assets: []*asset{item}, selected: item,
-		opts:     filterOptions{preset: "自定义", level: "-38.5", before: "0.25", after: "0.33", ends: true},
-		position: 2_000_009, viewLength: 3_000_011, viewStart: 1_000_005,
-		selection: timeline.Span{Start: 1_000_006, End: 2_000_007}}
+		opts: filterOptions{preset: "自定义", level: "-38.5", before: "0.25", after: "0.33", ends: true},
+		timelineState: timelineState{
+			position: 2_000_009, viewLength: 3_000_011, viewStart: 1_000_005,
+			selection: timeline.Span{Start: 1_000_006, End: 2_000_007},
+		}}
 	path := filepath.Join(dir, "项目.silencecut")
 	if err := writeProject(path, a.snapshot(path)); err != nil {
 		t.Fatal(err)
@@ -167,9 +169,11 @@ func TestProjectRejectsInvalidOptions(t *testing.T) {
 	}
 	base := (&app{
 		assets: []*asset{item}, selected: item,
-		opts:     filterOptions{preset: "自定义", level: "-40", before: "0.1", after: "0.2"},
-		position: timeline.Second, viewLength: 2 * timeline.Second,
-		selection: timeline.Span{Start: timeline.Second, End: 2 * timeline.Second},
+		opts: filterOptions{preset: "自定义", level: "-40", before: "0.1", after: "0.2"},
+		timelineState: timelineState{
+			position: timeline.Second, viewLength: 2 * timeline.Second,
+			selection: timeline.Span{Start: timeline.Second, End: 2 * timeline.Second},
+		},
 	}).snapshot("")
 	tests := []struct {
 		name string
@@ -266,8 +270,10 @@ func TestRecoverySkipsActiveSessions(t *testing.T) {
 		t.Fatalf("first launch: %v, %v", previous, err)
 	}
 	t.Cleanup(func() { first.close(false) })
-	state := &app{recovery: first, projectDirty: true, projectPath: "existing.silencecut",
-		opts: filterOptions{preset: "中等"}}
+	state := &app{
+		projectState: projectState{recovery: first, projectDirty: true, projectPath: "existing.silencecut"},
+		opts:         filterOptions{preset: "中等"},
+	}
 	if err := state.writeRecovery(); err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +349,7 @@ func TestCorruptRecoveryIsDiscarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { first.close(true) })
-	state := &app{recovery: first, projectDirty: true, opts: filterOptions{preset: "中等"}}
+	state := &app{projectState: projectState{recovery: first, projectDirty: true}, opts: filterOptions{preset: "中等"}}
 	if err := state.writeRecovery(); err != nil {
 		t.Fatal(err)
 	}
@@ -366,5 +372,51 @@ func TestCorruptRecoveryIsDiscarded(t *testing.T) {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("corrupt recovery remains at %s: %v", path, err)
 		}
+	}
+}
+
+func TestAsyncRecoveryRespectsClearAndClose(t *testing.T) {
+	dir := t.TempDir()
+	rec, _, err := openRecoveryAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.close(true) })
+
+	clips := []timeline.Clip{{Span: timeline.Span{End: 2 * timeline.Second}, Keep: true}}
+	item := &asset{
+		path: "sample.wav", name: "sample.wav",
+		info:     media.Info{Duration: 2 * timeline.Second, Rate: 48000, Channels: 1},
+		filtered: slices.Clone(clips),
+		history:  timeline.History{Clips: clips},
+	}
+	state := &app{
+		assets: []*asset{item}, selected: item, opts: filterOptions{preset: "中等"},
+		projectState: projectState{recovery: rec, projectDirty: true},
+	}
+
+	// Snapshot must isolate its slices from subsequent UI edits.
+	doc := state.recoverySnapshot()
+	item.history.Clips[0].Keep = false
+	if !doc.Assets[0].Clips[0].Keep {
+		t.Fatal("recovery snapshot shares slice storage with live timeline")
+	}
+
+	// Stale generation must not resurrect a cleared snapshot.
+	staleGen := rec.gen.Load()
+	state.clearRecovery()
+	target := rec.file.Name() + projectExt
+	if err := rec.writeSnapshot(target, doc, staleGen); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale recovery snapshot resurrected: %v", err)
+	}
+
+	// Async recovery writes in background and completes before workers.Wait returns.
+	state.startAsyncRecovery()
+	state.workers.Wait()
+	if _, err := readProject(target); err != nil {
+		t.Fatalf("async recovery snapshot unreadable: %v", err)
 	}
 }

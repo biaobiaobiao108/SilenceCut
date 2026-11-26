@@ -72,7 +72,7 @@ func BenchmarkNativeVideoSeek(b *testing.B) {
 	})
 	b.Run("scrub-final-frame", func(b *testing.B) {
 		item := &asset{info: media.Info{Duration: 12 * timeline.Second, Video: true}}
-		a := &app{selected: item, player: p, video: p}
+		a := &app{selected: item, previewState: previewState{player: p, video: p}}
 		blue := true
 		for b.Loop() {
 			b.StopTimer()
@@ -107,7 +107,7 @@ func BenchmarkNativeVideoSeek(b *testing.B) {
 				{Span: timeline.Span{Start: 8_000_000, End: 12_000_000}, Keep: true},
 			}},
 		}
-		a := &app{selected: item, player: p, video: p}
+		a := &app{selected: item, previewState: previewState{player: p, video: p}}
 		var latency time.Duration
 		for b.Loop() {
 			p.Pause()
@@ -154,7 +154,7 @@ func (p *testPreviewPlayer) Close()        { p.playing = false }
 func TestVideoScrubCoalescesAndSeeksFinalPosition(t *testing.T) {
 	item := &asset{info: media.Info{Duration: 10 * timeline.Second, Video: true}}
 	p := &testPreviewPlayer{}
-	a := &app{selected: item, player: p, waveDrag: waveGesture{kind: wavePlayhead}}
+	a := &app{selected: item, previewState: previewState{player: p}, timelineState: timelineState{waveDrag: waveGesture{kind: wavePlayhead}}}
 	start := time.Now()
 	a.updateWaveDrag(start, item, 100, 1000, item.info.Duration, true)
 	a.updateWaveDrag(start.Add(40*time.Millisecond), item, 200, 1000, item.info.Duration, true)
@@ -178,7 +178,7 @@ func TestFilteredVideoSkipsRemovedRangesInSource(t *testing.T) {
 		{Span: timeline.Span{Start: 7 * s, End: 9 * s}},
 	}}}
 	p := &testPreviewPlayer{}
-	a := &app{selected: item, player: p}
+	a := &app{selected: item, previewState: previewState{player: p}}
 	a.togglePlay()
 	if !p.Playing() || p.at != time.Second || a.position != s {
 		t.Fatalf("expected playback to start after leading silence, cursor %d, player %s", a.position, p.at)
@@ -232,7 +232,7 @@ func TestOriginalVideoUsesSourceClock(t *testing.T) {
 		}},
 	}
 	p := &testPreviewPlayer{}
-	a := &app{selected: item, player: p}
+	a := &app{selected: item, previewState: previewState{player: p}}
 	a.setPreviewMode(true)
 	a.togglePlay()
 	p.at = 3 * time.Second
@@ -248,7 +248,7 @@ func TestFilteredVideoAnticipatesCutBetweenUpdates(t *testing.T) {
 		{Span: timeline.Span{Start: 1_005_000, End: 2 * timeline.Second}, Keep: true},
 	}}}
 	p := &testPreviewPlayer{at: 995 * time.Millisecond, playing: true}
-	a := &app{selected: item, player: p}
+	a := &app{selected: item, previewState: previewState{player: p}}
 	if !a.updatePlaybackPosition() || len(p.seeks) != 1 || p.seeks[0] != 1005*time.Millisecond {
 		t.Fatalf("expected a seek before the short cut passes between frames, got %v", p.seeks)
 	}

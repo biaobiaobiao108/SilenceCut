@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -86,7 +88,7 @@ func (a *app) snapshot(path string) projectDocument {
 		}
 		doc.Assets = append(doc.Assets, projectAsset{
 			Path: filepath.ToSlash(source), Source: identity, Info: item.info, Automatic: item.automatic,
-			Settings: item.settings, Filtered: item.filtered, Clips: item.history.Clips,
+			Settings: item.settings, Filtered: slices.Clone(item.filtered), Clips: slices.Clone(item.history.Clips),
 		})
 	}
 	return doc
@@ -232,6 +234,19 @@ func validProjectClips(clips []timeline.Clip, duration int64) bool {
 	return end == duration
 }
 
+type projectState struct {
+	projectPath     string
+	projectRevision string
+	projectDirty    bool
+	closeApproved   bool
+	closePending    bool
+	recovery        *recoveryFile
+	recoveryAt      time.Time
+	recoveryWriting bool
+	recoveryPending bool
+	recoverySeq     uint64
+}
+
 func (a *app) markProject() {
 	if a.projectPath != "" || len(a.assets) > 0 || a.projectDirty {
 		a.projectDirty = true
@@ -254,25 +269,65 @@ func (a *app) recoveryTick(c *ui.Context) {
 		return
 	}
 	a.recoveryAt = time.Time{}
-	if err := a.writeRecovery(); err != nil {
-		a.status = "无法写入恢复快照 · " + err.Error()
+	if a.recovery == nil || !a.projectDirty {
+		return
 	}
+	if a.recoveryWriting {
+		a.recoveryPending = true
+		return
+	}
+	a.startAsyncRecovery()
+}
+
+func (a *app) recoverySnapshot() projectDocument {
+	doc := a.snapshot("")
+	doc.Project = a.projectPath
+	doc.BaseRevision = a.projectRevision
+	return doc
+}
+
+func (a *app) startAsyncRecovery() {
+	r := a.recovery
+	doc := a.recoverySnapshot()
+	target := r.file.Name() + projectExt
+	gen := r.gen.Load()
+	a.recoveryWriting = true
+	a.recoverySeq++
+	seq := a.recoverySeq
+	a.async(func() {
+		err := r.writeSnapshot(target, doc, gen)
+		if a.win == nil {
+			return
+		}
+		a.win.Update(func() {
+			a.recoveryWriting = false
+			if a.closing {
+				return
+			}
+			if err != nil && a.recoverySeq == seq {
+				a.status = "无法写入恢复快照 · " + err.Error()
+			}
+			if a.recoveryPending && a.projectDirty {
+				a.recoveryPending = false
+				a.scheduleRecovery()
+			}
+		})
+	})
 }
 
 func (a *app) writeRecovery() error {
 	if a.recovery == nil || !a.projectDirty {
 		return nil
 	}
-	doc := a.snapshot("")
-	doc.Project = a.projectPath
-	doc.BaseRevision = a.projectRevision
-	return writeProject(a.recovery.file.Name()+projectExt, doc)
+	return a.recovery.writeSnapshot(a.recovery.file.Name()+projectExt, a.recoverySnapshot(), a.recovery.gen.Load())
 }
 
 func (a *app) clearRecovery() {
 	a.recoveryAt = time.Time{}
+	a.recoveryPending = false
+	a.recoverySeq++
 	if a.recovery != nil {
-		removeRecovery(a.recovery.file.Name() + projectExt)
+		a.recovery.clear()
 	}
 }
 
@@ -282,7 +337,29 @@ func removeRecovery(path string) {
 	}
 }
 
-type recoveryFile struct{ file *os.File }
+type recoveryFile struct {
+	file *os.File
+	mu   sync.Mutex
+	gen  atomic.Uint64
+}
+
+func (r *recoveryFile) writeSnapshot(target string, doc projectDocument, gen uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file == nil || r.gen.Load() != gen {
+		return nil
+	}
+	return writeProject(target, doc)
+}
+
+func (r *recoveryFile) clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gen.Add(1)
+	if r.file != nil {
+		removeRecovery(r.file.Name() + projectExt)
+	}
+}
 
 func openRecovery() (*recoveryFile, *recoveryFile, error) {
 	config, err := os.UserConfigDir()
@@ -340,7 +417,7 @@ func openRecoveryAt(dir string) (*recoveryFile, *recoveryFile, error) {
 			f.Close()
 			continue
 		}
-		current := &recoveryFile{f}
+		current := &recoveryFile{file: f}
 		if previous == nil {
 			previous = current
 		} else {
@@ -358,13 +435,19 @@ func openRecoveryAt(dir string) (*recoveryFile, *recoveryFile, error) {
 		}
 		return nil, previous, err
 	}
-	return &recoveryFile{f}, previous, nil
+	return &recoveryFile{file: f}, previous, nil
 }
 
 func (r *recoveryFile) close(discard bool) {
-	if r == nil || r.file == nil {
+	if r == nil {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file == nil {
+		return
+	}
+	r.gen.Add(1)
 	path := r.file.Name()
 	if discard {
 		removeRecovery(path + projectExt)
