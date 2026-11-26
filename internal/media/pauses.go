@@ -182,6 +182,9 @@ func sustainedPitch(windows []pauseWindow, i int) bool {
 	// Quiet voiced syllables carry similar pitch across adjacent windows.
 	// Isolated correlation peaks also occur in breaths and room noise.
 	hz := windows[i].pitch
+	if hz == 0 {
+		return false
+	}
 	matches := 0
 	for j := max(0, i-2); j < min(len(windows), i+3); j++ {
 		other := windows[j].pitch

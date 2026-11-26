@@ -94,16 +94,12 @@ func primaryAction(c *ui.Context, label string, enabled bool, action func()) ui.
 			face = accentPressed
 		case button.Hovered() && c.Preferences().ReduceMotion:
 			face = accentHover
-		default:
+		case !c.Preferences().ReduceMotion:
 			hover := float32(0)
 			if button.Hovered() {
 				hover = 1
 			}
-			if c.Preferences().ReduceMotion {
-				face = accent
-			} else {
-				face = accent.Mix(accentHover, button.Animate("hover", hover, hoverDuration))
-			}
+			face = accent.Mix(accentHover, button.Animate("hover", hover, hoverDuration))
 		}
 	}
 	button.Background(face).TextColor(textColor)

@@ -174,3 +174,42 @@ func TestPreviewDownmixesCenterChannel(t *testing.T) {
 		t.Fatalf("center channel lost in stereo: left %.3f right %.3f", left, right)
 	}
 }
+
+func TestOpenPreviewMatchesPreviewMode(t *testing.T) {
+	source := selectionExportFixture(t)
+	clips := []timeline.Clip{
+		{Span: timeline.Span{Start: 0, End: timeline.Second}, Keep: true},
+		{Span: timeline.Span{Start: timeline.Second, End: 2 * timeline.Second}, Keep: false},
+	}
+	item := &asset{
+		path:    source,
+		info:    media.Info{Duration: 2 * timeline.Second, Rate: 48000, Channels: 1},
+		history: timeline.History{Clips: clips},
+	}
+
+	a := &app{selected: item}
+	a.openPreview(item)
+	if a.player == nil {
+		t.Fatalf("expected preview player, got error %q", a.previewIssue)
+	}
+	if _, ok := a.player.(*auditionPlayer); !ok {
+		a.closePreview()
+		t.Fatalf("filtered mode should open auditionPlayer directly, got %T", a.player)
+	}
+	if !a.prepareAudioPlayback(clips) {
+		a.closePreview()
+		t.Fatal("prepareAudioPlayback failed")
+	}
+	a.closePreview()
+
+	a.originalPreview = true
+	a.openPreview(item)
+	if a.player == nil {
+		t.Fatalf("expected original preview player, got error %q", a.previewIssue)
+	}
+	if _, ok := a.player.(*audioPreview); !ok {
+		a.closePreview()
+		t.Fatalf("original mode should open audioPreview directly, got %T", a.player)
+	}
+	a.closePreview()
+}

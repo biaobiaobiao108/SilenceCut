@@ -535,5 +535,8 @@ func audioFrameStart(start, previousEnd int64, rate int) int64 {
 }
 
 func fraction(done, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
 	return max(0, min(1, float64(done)/float64(total)))
 }

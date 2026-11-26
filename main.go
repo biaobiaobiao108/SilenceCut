@@ -378,7 +378,11 @@ func (a *app) report() media.Progress {
 			return
 		}
 		last = time.Now()
-		a.win.Update(func() { a.progress = max(a.progress, value) })
+		a.win.Update(func() {
+			if !a.closing {
+				a.progress = max(a.progress, value)
+			}
+		})
 	}
 }
 
@@ -432,7 +436,7 @@ func (a *app) filter(items []*asset) {
 				preview = func(info media.Info, peaks []timeline.Peak) {
 					wave := &analysisWave{info: info, wave: timeline.BuildWaveform(peaks)}
 					a.win.Update(func() {
-						if ctx.Err() == nil && item.analyzing {
+						if !a.closing && ctx.Err() == nil && item.analyzing {
 							item.pendingWave = wave
 						}
 					})
@@ -446,6 +450,9 @@ func (a *app) filter(items []*asset) {
 			if err != nil {
 				failed++
 				a.win.Update(func() {
+					if a.closing {
+						return
+					}
 					item.analyzing = false
 					item.pendingWave = nil
 					item.issue = err.Error()
@@ -454,6 +461,9 @@ func (a *app) filter(items []*asset) {
 			}
 			succeeded++
 			a.win.Update(func() {
+				if a.closing {
+					return
+				}
 				reload := item.info.Duration == 0 || item.offline || changed(item.file, current.file)
 				if reload {
 					if item == a.selected {
@@ -479,6 +489,9 @@ func (a *app) filter(items []*asset) {
 		}
 		status := batchStatus("过滤", fmt.Sprintf("已过滤 %d 个素材", succeeded), succeeded, failed, "可查看错误详情", ctx.Err() != nil)
 		a.win.Update(func() {
+			if a.closing {
+				return
+			}
 			for _, item := range items {
 				item.analyzing = false
 				item.pendingWave = nil
@@ -702,6 +715,9 @@ func (a *app) export(dir string) {
 		}
 		status := batchStatus("导出", fmt.Sprintf("已导出 %d 个文件", count), count, failures, detail, ctx.Err() != nil)
 		a.win.Update(func() {
+			if a.closing {
+				return
+			}
 			for _, item := range failed {
 				item.item.exportIssue = item.issue
 			}
@@ -764,6 +780,9 @@ func (a *app) exportSelection(item *asset, span timeline.Span, dir string) {
 			status = "导出选中区域失败 · " + err.Error()
 		}
 		a.win.Update(func() {
+			if a.closing {
+				return
+			}
 			if err != nil && !errors.Is(err, context.Canceled) {
 				item.exportIssue = err.Error()
 			}
@@ -814,7 +833,11 @@ func (a *app) openPreview(item *asset) {
 		a.player, a.video, a.previewSince = p, p, time.Now()
 		return
 	}
-	p, err := openAudioPreview(item.path, nil)
+	var clips []timeline.Clip
+	if !a.originalPreview {
+		clips = item.history.Clips
+	}
+	p, err := openAudioPreview(item.path, clips)
 	if err != nil {
 		a.previewIssue = err.Error()
 		return

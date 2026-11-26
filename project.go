@@ -681,6 +681,9 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 				automatic = timeline.AutomaticThreshold(peaks)
 			}
 			a.win.Update(func() {
+				if a.closing {
+					return
+				}
 				item.pendingLoad = false
 				if err != nil {
 					item.issue, item.offline = err.Error(), true
@@ -701,6 +704,9 @@ func (a *app) loadProjectSources(items []*asset, relink string) {
 			})
 		}
 		a.win.Update(func() {
+			if a.closing {
+				return
+			}
 			if a.player == nil && a.selected != nil && a.selected.file != nil && !a.selected.offline && a.selected.info.Duration > 0 {
 				a.openPreview(a.selected)
 			}

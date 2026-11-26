@@ -875,3 +875,13 @@ func BenchmarkLongVideoExport(b *testing.B) {
 		})
 	}
 }
+
+func TestEdgeGuards(t *testing.T) {
+	if got := fraction(10, 0); got != 0 || math.IsNaN(got) {
+		t.Fatalf("fraction with zero total = %v", got)
+	}
+	windows := []pauseWindow{{pitch: 0}, {pitch: 0}, {pitch: 0}, {pitch: 0}}
+	if sustainedPitch(windows, 1) {
+		t.Fatal("sustainedPitch must return false when pitch is zero")
+	}
+}
